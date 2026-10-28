@@ -1,177 +1,194 @@
 {
   "manifest_version": 1,
   "type": "device",
-  "name": "Demo Devices Template",
+  "name": "Wolf ISM8",
   "description": {
-    "en": "Starter template showing sensors, a switch, a dimmable light and a smart plug.",
-    "fr": "Template de démarrage : capteurs, interrupteur, lampe variable et prise connectée."
+    "en": "Wolf heating through the ISM8i module: temperatures, states, programs, locally.",
+    "fr": "Chauffage Wolf par le module ISM8i : températures, états, programmes, en local."
   },
-  "version": "1.0.0",
-  "docker_image": "ghcr.io/gladysassistant/integration-template-js:1.0.0",
+  "version": "0.1.0",
+  "docker_image": "ghcr.io/lm1lc3n7/gladys-wolf-ism8:0.1.0",
   "gladys_version": ">=5.1.0",
-  "cover_image": "https://raw.githubusercontent.com/GladysAssistant/integration-template-js/master/cover.png",
-  "categories": ["lighting", "security", "environment"],
-  "transports": ["local", "cloud"],
+  "cover_image": "https://raw.githubusercontent.com/LM1LC3N7/gladys-wolf-ism8/main/cover.png",
+  "categories": ["climate"],
+  "transports": ["local"],
+  "containers": [
+    {
+      "name": "ism8-link",
+      "docker_image": "ghcr.io/lm1lc3n7/gladys-wolf-ism8:0.1.0",
+      "command": ["node", "src/receiver.js"],
+      "start": "manual",
+      "read_only": true,
+      "memory_mb": 64,
+      "cpu": 0.1,
+      "ports": [
+        {
+          "container_port": 12004,
+          "protocol": "tcp",
+          "name": "ism8",
+          "label": {
+            "en": "Wolf ISM8i connection (TCP)",
+            "fr": "Connexion de l’ISM8i Wolf (TCP)"
+          },
+          "browsable": false
+        }
+      ]
+    }
+  ],
   "config_schema": [
     {
       "key": "intro",
       "type": "section",
-      "label": { "en": "Getting started", "fr": "Pour commencer" },
+      "label": {
+        "en": "Your Wolf heating, through its ISM8i module",
+        "fr": "Votre chauffage Wolf, par son module ISM8i"
+      },
       "description": {
-        "en": "The demo weather station reads real data from the free Open-Meteo API: pick the coordinates to observe. No account, no API key.",
-        "fr": "La station météo de démonstration lit de vraies données via l'API gratuite Open-Meteo : choisissez les coordonnées à observer. Pas de compte, pas de clé d'API."
+        "en": "Temperatures, states, faults and programs of the Wolf boilers, heat pumps, circuits and ventilation the ISM8i (or ISM8) module reports, on your local network, without any cloud. The ISM8i connects to Gladys by itself. Give it a fixed IP address in your router. Never tested with a real ISM8i. Unofficial integration, not affiliated with Wolf.",
+        "fr": "Températures, états, défauts et programmes des chaudières, pompes à chaleur, circuits et ventilation Wolf que le module ISM8i (ou ISM8) transmet, sur votre réseau local, sans cloud. L’ISM8i se connecte lui-même à Gladys. Donnez-lui une adresse IP fixe dans votre box. Jamais testé avec un vrai ISM8i. Intégration non officielle, sans lien avec Wolf."
       },
       "links": [
         {
-          "url": "https://open-meteo.com/en/docs",
-          "label": { "en": "Open-Meteo documentation", "fr": "Documentation Open-Meteo" }
+          "url": "https://github.com/LM1LC3N7/gladys-wolf-ism8/blob/main/docs/fr.md",
+          "label": {
+            "en": "Guide (French)",
+            "fr": "Guide (français)"
+          }
+        },
+        {
+          "url": "https://github.com/LM1LC3N7/gladys-wolf-ism8/blob/main/docs/en.md",
+          "label": {
+            "en": "Guide (English)",
+            "fr": "Guide (anglais)"
+          }
         }
       ]
     },
     {
-      "key": "latitude",
-      "type": "number",
-      "label": { "en": "Latitude", "fr": "Latitude" },
-      "description": {
-        "en": "Latitude used for the demo weather sensor.",
-        "fr": "Latitude utilisée par le capteur météo de démonstration."
+      "key": "ism8_address",
+      "type": "string",
+      "label": {
+        "en": "Address of the ISM8i",
+        "fr": "Adresse de l’ISM8i"
       },
-      "placeholder": { "en": "e.g. 48.8566", "fr": "ex. 48.8566" },
+      "description": {
+        "en": "The IP address of the ISM8i module (the one of its web page), without a port. Nothing listens before it is saved.",
+        "fr": "L’adresse IP du module ISM8i (celle de sa page web), sans port. Rien n’écoute avant son enregistrement."
+      },
+      "placeholder": {
+        "en": "192.168.1.60",
+        "fr": "192.168.1.60"
+      },
       "required": true,
-      "default": 48.8566,
-      "min": -90,
-      "max": 90
+      "default": ""
     },
     {
-      "key": "longitude",
-      "type": "number",
-      "label": { "en": "Longitude", "fr": "Longitude" },
-      "description": {
-        "en": "Longitude used for the demo weather sensor.",
-        "fr": "Longitude utilisée par le capteur météo de démonstration."
+      "key": "connection_section",
+      "type": "section",
+      "label": {
+        "en": "How the ISM8i reaches Gladys",
+        "fr": "Comment l’ISM8i joint Gladys"
       },
-      "placeholder": { "en": "e.g. 2.3522", "fr": "ex. 2.3522" },
-      "required": true,
-      "default": 2.3522,
-      "min": -180,
-      "max": 180
+      "description": {
+        "en": "The ISM8i opens the connection itself. In its web page, set the server address to the IP address of the Gladys machine on your network and the port to {{port:ism8}} (chosen by Gladys, replacing the 12004 of the ISM8i). The port exists once the address of the ISM8i is saved: save, then reload this screen. Allow this port in the firewall of the Gladys machine if it has one.",
+        "fr": "C’est l’ISM8i qui ouvre la connexion. Dans sa page web, indiquez comme adresse du serveur l’adresse IP de la machine Gladys sur votre réseau et comme port {{port:ism8}} (choisi par Gladys, à la place du 12004 de l’ISM8i). Le port existe une fois l’adresse de l’ISM8i enregistrée : enregistrez, puis rechargez cet écran. Autorisez ce port dans le pare-feu de la machine Gladys s’il y en a un."
+      }
     },
     {
-      "key": "unit",
+      "key": "check_source",
+      "type": "boolean",
+      "label": {
+        "en": "Check the sender",
+        "fr": "Vérifier l’expéditeur"
+      },
+      "description": {
+        "en": "Accept the connection only from the address of the ISM8i. Turn it off only if the status says connections come from another address because Docker hides the real one on this machine: then any machine of your network can send values in its place.",
+        "fr": "N’accepter la connexion que depuis l’adresse de l’ISM8i. À désactiver seulement si l’état dit que les connexions viennent d’une autre adresse parce que Docker masque la vraie sur cette machine : toute machine de votre réseau peut alors envoyer des valeurs à sa place."
+      },
+      "required": false,
+      "default": true
+    },
+    {
+      "key": "writes_section",
+      "type": "section",
+      "label": {
+        "en": "Changing settings",
+        "fr": "Modifier les réglages"
+      },
+      "description": {
+        "en": "The hot water setpoint and the heating and hot water programs of the direct circuit and of the mixer circuits can be changed from Gladys once allowed below (off by default). The standby program (off, frost protection kept) is always allowed: stopping is never blocked. The ISM8 protocol has no password: keep it on a trusted network.",
+        "fr": "La consigne d’eau chaude et les programmes de chauffage et d’eau chaude du circuit direct et des circuits mélangés peuvent être changés depuis Gladys une fois autorisés ci-dessous (désactivé par défaut). Le programme veille (arrêt, hors-gel conservé) est toujours permis : arrêter n’est jamais bloqué. Le protocole ISM8 n’a pas de mot de passe : gardez-le sur un réseau de confiance."
+      }
+    },
+    {
+      "key": "allow_writes",
+      "type": "boolean",
+      "label": {
+        "en": "Allow changing the settings",
+        "fr": "Autoriser la modification des réglages"
+      },
+      "description": {
+        "en": "Off: only the standby program can be selected; any other change is refused.",
+        "fr": "Désactivé : seul le programme veille peut être choisi ; tout autre changement est refusé."
+      },
+      "required": false,
+      "default": false
+    },
+    {
+      "key": "dhw_max_temperature",
+      "type": "number",
+      "label": {
+        "en": "Hot water ceiling (°C)",
+        "fr": "Plafond de l’eau chaude (°C)"
+      },
+      "description": {
+        "en": "A hot water setpoint above it is refused. 20 to 65 °C; never above 65 °C, whatever is typed.",
+        "fr": "Une consigne d’eau chaude au-dessus est refusée. 20 à 65 °C ; jamais au-dessus de 65 °C, quoi qu’on saisisse."
+      },
+      "required": false,
+      "default": 65,
+      "min": 20,
+      "max": 65
+    },
+    {
+      "key": "language",
       "type": "select",
-      "label": { "en": "Temperature unit", "fr": "Unité de température" },
-      "required": false,
-      "default": "celsius",
-      "options": [
-        { "value": "celsius", "label": { "en": "Celsius", "fr": "Celsius" } },
-        { "value": "fahrenheit", "label": { "en": "Fahrenheit", "fr": "Fahrenheit" } }
-      ]
-    },
-    {
-      "key": "poll_frequency",
-      "type": "number",
-      "label": { "en": "Refresh interval (s)", "fr": "Intervalle de rafraîchissement (s)" },
-      "description": {
-        "en": "How often sensors are polled, in seconds (one minute minimum).",
-        "fr": "Fréquence d'interrogation des capteurs, en secondes (une minute minimum)."
+      "label": {
+        "en": "Language of the names and messages",
+        "fr": "Langue des noms et des messages"
       },
       "required": false,
-      "default": 300,
-      "min": 60,
-      "max": 3600
+      "default": "fr",
+      "options": [
+        {
+          "value": "fr",
+          "label": {
+            "en": "French",
+            "fr": "Français"
+          }
+        },
+        {
+          "value": "en",
+          "label": {
+            "en": "English",
+            "fr": "Anglais"
+          }
+        }
+      ]
     }
   ],
   "actions": [
     {
-      "key": "test_weather",
-      "label": { "en": "Test the weather provider", "fr": "Tester le fournisseur météo" },
-      "timeout_seconds": 30
-    },
-    {
-      "key": "identify",
-      "label": { "en": "Identify a device", "fr": "Identifier un appareil" },
-      "fields": [
-        {
-          "key": "device",
-          "type": "select",
-          "source": "devices",
-          "label": { "en": "Device", "fr": "Appareil" },
-          "required": true
-        }
-      ]
-    }
-  ],
-  "scene_triggers": [
-    {
-      "key": "motion_detected",
-      "label": { "en": "Motion detected", "fr": "Mouvement détecté" },
-      "description": {
-        "en": "A demo motion sensor saw a person or an animal move.",
-        "fr": "Un détecteur de démonstration a vu bouger une personne ou un animal."
+      "key": "refresh",
+      "label": {
+        "en": "Read every value again",
+        "fr": "Relire toutes les valeurs"
       },
-      "fields": [
-        {
-          "key": "device",
-          "type": "select",
-          "source": "devices",
-          "label": { "en": "Sensor", "fr": "Détecteur" }
-        },
-        {
-          "key": "target",
-          "type": "multi_select",
-          "label": { "en": "What moved", "fr": "Ce qui a bougé" },
-          "options": [
-            { "value": "person", "label": { "en": "Person", "fr": "Personne" } },
-            { "value": "animal", "label": { "en": "Animal", "fr": "Animal" } }
-          ]
-        }
-      ],
-      "variables": [
-        {
-          "key": "target",
-          "type": "string",
-          "label": { "en": "What moved", "fr": "Ce qui a bougé" }
-        }
-      ]
-    }
-  ],
-  "scene_actions": [
-    {
-      "key": "identify_device",
-      "label": { "en": "Identify a device", "fr": "Identifier un appareil" },
       "description": {
-        "en": "Make a device signal itself (the demo light blinks).",
-        "fr": "Fait se signaler un appareil (la lampe de démonstration clignote)."
+        "en": "Asks the connected ISM8i to send every value again (at most every 30 s).",
+        "fr": "Demande à l’ISM8i connecté de renvoyer toutes les valeurs (au plus toutes les 30 s)."
       },
-      "timeout_seconds": 15,
-      "fields": [
-        {
-          "key": "device",
-          "type": "select",
-          "source": "devices",
-          "label": { "en": "Device", "fr": "Appareil" },
-          "required": true
-        }
-      ],
-      "outputs": [
-        {
-          "key": "signalled",
-          "type": "boolean",
-          "label": { "en": "Device signalled", "fr": "Appareil signalé" }
-        }
-      ]
-    }
-  ],
-  "widgets": [
-    {
-      "key": "demo_status",
-      "label": { "en": "Demo status", "fr": "État de la démo" },
-      "description": {
-        "en": "Live temperature and plug power, plug connection and observed location.",
-        "fr": "Température et puissance en direct, connexion de la prise, position observée."
-      },
-      "icon": "activity",
-      "action_timeout_seconds": 15
+      "timeout_seconds": 10
     }
   ]
 }
