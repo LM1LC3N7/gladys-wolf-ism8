@@ -106,8 +106,9 @@ Une commande part seulement si l’option est active à son arrivée **et** just
 avant l’envoi, si l’ISM8i est connecté, et si la valeur actuelle a été reçue
 pendant sa connexion en cours. Elle est dite appliquée seulement quand
 l’ISM8i renvoie la nouvelle valeur (il signale de lui-même chaque
-changement) ; sinon « envoyée, sans confirmation ». Le résultat s’affiche
-dans l’état de l’intégration.
+changement, et toutes les valeurs sont redemandées environ 5 s après
+l’écriture, une demande pour plusieurs écritures) ; sinon « envoyée, sans
+confirmation ». Le résultat s’affiche dans l’état de l’intégration.
 
 Jamais écrits : puissances et températures imposées des chaudières, programmes
 horaires, charge d’eau chaude ponctuelle, ventilation, et toute autre valeur.
@@ -124,14 +125,18 @@ encore lue dans Gladys, rien ne le retient. Il est gardé dans `/data` et :
 - sinon part dès la prochaine connexion de l’ISM8i, sans attendre la
   configuration (après un redémarrage de l’intégration aussi, dès que
   l’ISM8i est revenu sur le récepteur) ;
-- est renvoyé si aucune valeur lue ne le confirme dans les 20 s, ou espacé de
-  5 s si une valeur lue le contredit, 3 envois au plus en tout ; au-delà,
-  l’état demande de vérifier la chaudière.
+- est confirmé par une valeur lue : l’ISM8i la signale, et toutes les valeurs
+  sont redemandées une fois ses 20 s de calme passées ;
+- est renvoyé si rien ne l’a confirmé 35 s après l’envoi (3 s s’il est parti
+  moins de 10 s après une demande de toutes les valeurs), ou espacé de 5 s si
+  une valeur lue le contredit, 3 envois au plus en tout ; au-delà, l’état
+  demande de vérifier la chaudière.
 
 Seuls cas où il ne part pas tout de suite : l’ISM8i n’est pas connecté, sa
 connexion vient de changer à cet instant (l’arrêt part alors aussitôt sur la
-nouvelle), ou le récepteur ne tourne pas (adresse pas encore enregistrée). Il
-attend alors dans `/data` et l’état dit « arrêt gardé », jamais « envoyée ».
+nouvelle), le récepteur ne tourne pas (adresse pas encore enregistrée), ou
+il tourne mais ne répond pas à l’intégration (il est alors relancé au bout
+de 3 minutes, au plus toutes les 10 minutes). Il attend alors dans `/data` et l’état dit « arrêt gardé », jamais « envoyée ».
 Aucune demande de toutes les valeurs ne part dans les 20 s d’un arrêt pas
 encore confirmé. Une fois confirmé, il n’est plus jamais renvoyé : un programme
 changé ensuite sur la chaudière ou dans l’application Wolf, lu deux fois de
@@ -163,9 +168,10 @@ l’arrêt).
 
 Demande à l’ISM8i connecté de renvoyer toutes ses valeurs (au plus toutes les
 30 s, jamais dans les 20 s d’un arrêt pas encore confirmé). L’intégration le
-demande aussi quand Gladys se reconnecte, pour afficher des valeurs fraîches ;
-sinon l’ISM8i envoie toutes ses valeurs à sa connexion, puis chaque
-changement.
+demande aussi quand Gladys se reconnecte (valeurs fraîches), après les
+écritures et les arrêts (regroupé, voir plus haut) et quand une nouvelle
+connexion n’a apporté aucune valeur en 2 s ; sinon l’ISM8i envoie toutes ses
+valeurs à sa connexion, puis chaque changement.
 
 ## Dépannage
 

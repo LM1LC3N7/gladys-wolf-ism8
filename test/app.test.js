@@ -215,14 +215,16 @@ test('hot water: above 65 °C or the configured ceiling is refused, whatever the
   assert.equal(ctx.channel().writes().length, 0);
 });
 
-test('a write without its echo: "sent, without confirmation", no "request all" after it', async (t) => {
+test('a write without its echo: "sent, without confirmation", one grouped follow-up read', async (t) => {
   const ctx = await ready(t);
   const before = ctx.channel().readAlls();
   const ack = await ctx.command('direct-circuit', 56, 60);
   assert.equal(ack.success, true);
   assert.match(status(ctx.gladys).message.en, /sent, without confirmation/);
   await ctx.advance(25 * SECOND);
-  assert.equal(ctx.channel().readAlls(), before);
+  assert.equal(ctx.channel().readAlls(), before + 1);
+  await ctx.advance(5 * MINUTE);
+  assert.equal(ctx.channel().readAlls(), before + 1);
 });
 
 test('a read back equal to the value before is not a confirmation', async (t) => {
@@ -698,13 +700,17 @@ test('the channel secret never reaches the logs nor the status', async (t) => {
   assert.ok(!JSON.stringify(ctx.gladys.fake.discoveredDevices).includes(token));
 });
 
-test('a stop not confirmed is sent again after 20 s, 3 sendings in all, never more at the next session', async (t) => {
+test('a stop not confirmed: a read after 20 s, sent again at 35 s, 3 sendings in all, never more at the next session', async (t) => {
   const ctx = await setup(t);
   await ctx.ism8Up(1);
+  await ctx.values([[4, temp(50)]]);
   await ctx.command('direct-circuit', 57, 'standby');
   await ctx.advance(15 * SECOND);
+  assert.equal(ctx.channel().readAlls(), 0, 'quiet after a stop');
+  await ctx.advance(7 * SECOND);
+  assert.equal(ctx.channel().readAlls(), 1, 'the grouped read');
   assert.equal(ctx.channel().writes(57).length, 1);
-  await ctx.advance(6 * SECOND);
+  await ctx.advance(12 * SECOND);
   assert.equal(ctx.channel().writes(57).length, 2);
   await ctx.advance(60 * SECOND);
   assert.equal(ctx.channel().writes(57).length, 3);
@@ -743,6 +749,7 @@ test('no "request all" while a stop waits for its confirmation', async (t) => {
 
 test('the link is started only when it does not run or its environment changed', async (t) => {
   const ctx = await setup(t);
+  ctx.channel().up(null);
   assert.equal(startCalls(ctx.gladys).length, 1);
   await ctx.app.gladysConnected();
   await ctx.gladys.fake.configUpdated({ ...CONFIG, language: 'en' });
@@ -751,6 +758,7 @@ test('the link is started only when it does not run or its environment changed',
   await ctx.gladys.fake.configUpdated({ ...CONFIG, check_source: false });
   assert.equal(startCalls(ctx.gladys).length, 2);
   ctx.gladys.fake.containers[0].status = 'exited';
+  ctx.channel().down();
   await ctx.advance(71 * SECOND);
   assert.equal(startCalls(ctx.gladys).length, 3, 'a link that stopped is started again');
 });
@@ -763,8 +771,129 @@ test('Gladys reconnecting asks no "request all" while a stop waits for its confi
   await ctx.app.gladysConnected();
   await ctx.advance(100);
   assert.equal(ctx.channel().readAlls(), 0);
+  await ctx.advance(15 * SECOND);
+  assert.equal(ctx.channel().readAlls(), 0, 'still quiet');
+  // Right when the quiet time ends (20 s after the stop), before the follow-up at 21 s.
+  await ctx.advance(2 * SECOND);
+  assert.equal(ctx.channel().readAlls(), 1, 'as soon as the stop is quiet');
+  await ctx.advance(5 * SECOND);
+  assert.equal(ctx.channel().readAlls(), 1, 'one read for both');
+});
+
+test('a link running with another secret: started again after 3 min of silent channel, then every 10 min at most', async (t) => {
+  const ctx = await setup(t);
+  assert.equal(startCalls(ctx.gladys).length, 1);
+  await ctx.advance(2 * MINUTE);
+  assert.equal(startCalls(ctx.gladys).length, 1);
+  await ctx.advance(80 * SECOND);
+  assert.equal(startCalls(ctx.gladys).length, 2);
+  await ctx.advance(9 * MINUTE);
+  assert.equal(startCalls(ctx.gladys).length, 2, 'not in a loop');
+  await ctx.advance(2 * MINUTE);
+  assert.equal(startCalls(ctx.gladys).length, 3);
+  // Once the channel comes up, no more.
+  ctx.channel().up(null);
+  await ctx.advance(30 * MINUTE);
+  assert.equal(startCalls(ctx.gladys).length, 3);
+});
+
+test('an ISM8 that never reports a write back: the grouped read confirms the stop, the circuit is free', async (t) => {
+  const ctx = await ready(t);
+  ctx.channel().answer = (message) => {
+    if (message.type === 'readAll') {
+      ctx.clock.timers.setTimeout(() => {
+        ctx.channel().emit('message', {
+          type: 'values',
+          session: ctx.app.session.id,
+          at: ctx.at(),
+          items: [[57, 3, '02']],
+        });
+      }, 500);
+    }
+    return { sent: true };
+  };
+  const ack = await ctx.command('direct-circuit', 57, 'standby');
+  assert.deepEqual(ack.data, { confirmed: false });
+  await ctx.advance(25 * SECOND);
+  assert.equal(ctx.store.data.stops['57'].confirmed, true);
+  echo(ctx);
+  const setpoint = await ctx.command('direct-circuit', 56, 55);
+  assert.equal(setpoint.success, true);
+  await ctx.advance(60 * SECOND);
+  assert.equal(ctx.channel().writes(57).length, 1, 'confirmed: never sent again');
+});
+
+test('a session read refused by the spacing is tried again when it allows', async (t) => {
+  const ctx = await setup(t);
+  await ctx.ism8Up(1);
+  await ctx.advance(3 * SECOND);
+  assert.equal(ctx.channel().readAlls(), 1);
+  await ctx.ism8Up(2);
+  await ctx.advance(10 * SECOND);
+  assert.equal(ctx.channel().readAlls(), 1, 'within 30 s of the last one');
+  // The first read went at ~2 s: the second right after 32 s, not later.
   await ctx.advance(20 * SECOND);
-  await ctx.app.gladysConnected();
-  await ctx.advance(100);
-  assert.equal(ctx.channel().readAlls(), 0, 'sent again at 20 s: still waiting');
+  assert.equal(ctx.channel().readAlls(), 2);
+});
+
+test('a session read refused by the link for its own spacing is tried again', async (t) => {
+  const ctx = await setup(t);
+  ctx.channel().answer = (message) =>
+    message.type === 'readAll' && ctx.channel().readAlls() === 1
+      ? { sent: false, reason: 'rate' }
+      : { sent: true };
+  await ctx.ism8Up(1);
+  await ctx.advance(3 * SECOND);
+  assert.equal(ctx.channel().readAlls(), 1);
+  await ctx.advance(35 * SECOND);
+  assert.equal(ctx.channel().readAlls(), 2);
+});
+
+test('a stop the link did not write gives its quiet time back: a contradicting read sends it at once', async (t) => {
+  const ctx = await setup(t);
+  await ctx.ism8Up(1);
+  ctx.channel().answer = () => ({ sent: false, reason: 'session' });
+  await ctx.command('direct-circuit', 57, 'standby');
+  assert.equal(ctx.app.stopInFlight(), false);
+  ctx.channel().answer = () => ({ sent: true });
+  await ctx.values([[57, byte(0)]]);
+  assert.equal(ctx.channel().writes(57).length, 2);
+});
+
+test('a stop sent less than 10 s after a "request all" is sent again after 3 s if not confirmed', async (t) => {
+  const ctx = await setup(t);
+  await ctx.ism8Up();
+  await ctx.advance(2500);
+  assert.equal(ctx.channel().readAlls(), 1, 'the session read of a silent ISM8');
+  await ctx.command('direct-circuit', 57, 'standby');
+  // The click waits 3.4 s for its echo: the second sending went at 3 s.
+  assert.equal(ctx.channel().writes(57).length, 2);
+  await ctx.values([[57, byte(2)]]);
+  await ctx.advance(60 * SECOND);
+  assert.equal(ctx.channel().writes(57).length, 2, 'confirmed: no more');
+});
+
+test('grouped follow-up reads: a later write postpones the read, one read for both', async (t) => {
+  const ctx = await ready(t);
+  await ctx.values([[69, temp(50)]]);
+  const before = ctx.channel().readAlls();
+  await ctx.command('direct-circuit', 56, 55);
+  // the click took ~3.4 s; the second write is due later than the first read
+  await ctx.command('mixer-circuit-1', 69, 54);
+  // ~6.8 s after the first write: its read (due at 5 s) was postponed.
+  assert.equal(ctx.channel().readAlls(), before, 'postponed after the second write');
+  await ctx.advance(3 * SECOND);
+  assert.equal(ctx.channel().readAlls(), before + 1);
+  await ctx.advance(60 * SECOND);
+  assert.equal(ctx.channel().readAlls(), before + 1);
+});
+
+test('a follow-up read of an ended session is dropped', async (t) => {
+  const ctx = await ready(t);
+  await ctx.command('direct-circuit', 56, 55);
+  await ctx.ism8Up(2);
+  await ctx.values([[56, temp(55)]]);
+  const before = ctx.channel().readAlls();
+  await ctx.advance(60 * SECOND);
+  assert.equal(ctx.channel().readAlls(), before);
 });

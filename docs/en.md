@@ -103,9 +103,10 @@ Off by default. With **Allow changing the settings**:
 A command leaves only if the option is on when it arrives **and** right
 before sending, if the ISM8i is connected, and if the current value was
 received during its current connection. It is said applied only when the
-ISM8i reports the new value back (it reports every change by itself);
-otherwise "sent, without confirmation". The outcome shows in the status of
-the integration.
+ISM8i reports the new value back (it reports every change by itself, and
+every value is asked again about 5 s after the write, one request for
+several writes); otherwise "sent, without confirmation". The outcome shows
+in the status of the integration.
 
 Never written: power and temperature presets of the boilers, time programs,
 the one-off hot water charge, ventilation, and any other value.
@@ -123,14 +124,18 @@ configuration not yet read from Gladys, nothing holds it. It is kept in
 - otherwise leaves at the next connection of the ISM8i, without waiting for
   the configuration (after a restart of the integration too, as soon as the
   ISM8i is back on the receiver);
-- is sent again when no value read confirms it within 20 s, or 5 s apart
-  when a value read contradicts it, 3 sendings at most in all; beyond that,
-  the status asks you to check the boiler.
+- is confirmed by a value read: the ISM8i reports it, and every value is
+  asked again once its 20 s of quiet are over;
+- is sent again when nothing confirmed it 35 s after sending (3 s when it
+  left less than 10 s after a request for every value), or 5 s apart when a
+  value read contradicts it, 3 sendings at most in all; beyond that, the
+  status asks you to check the boiler.
 
 The only cases where it does not leave at once: the ISM8i is not connected,
 its connection changed at that very moment (the stop then leaves at once on
-the new one), or the receiver is not running (address not saved yet). It
-then waits in `/data` and the status says "stop kept", never "sent". No
+the new one), the receiver is not running (address not saved yet), or the
+receiver runs but does not answer the integration (it is then started again
+after 3 minutes, at most every 10 minutes). It then waits in `/data` and the status says "stop kept", never "sent". No
 "request all" is sent within 20 s of a stop not yet confirmed. Once
 confirmed it is never sent again: a program changed later on
 the boiler or in the Wolf app, read twice in a row, lifts the stop without
@@ -160,8 +165,9 @@ another program for the stopped one stays allowed (it lifts the stop).
 
 Asks the connected ISM8i to send every value again (at most every 30 s,
 never within 20 s of a stop not yet confirmed). The integration also asks
-when Gladys reconnects, to show fresh values; otherwise the ISM8i sends
-every value when it connects and each change afterwards.
+when Gladys reconnects (fresh values), after writes and stops (grouped, see
+above) and when a new connection brought no value within 2 s; otherwise the
+ISM8i sends every value when it connects and each change afterwards.
 
 ## Troubleshooting
 

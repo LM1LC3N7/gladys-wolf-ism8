@@ -38,9 +38,14 @@ up to date at the end of every milestone.
   value by itself at connection (Home Assistant relies on it)?
 - How fast the ISM8i reconnects after the link restarted (every main
   container restart, see Decisions).
-- Whether the ISM8i reports a written datapoint back (the confirmation of a
-  command relies on it only): if not, every command stays "sent, without
-  confirmation" and every stop is sent 3 times.
+- Whether the ISM8i reports a written datapoint back: if not, a command is
+  confirmed only by the grouped read ~5 s after it (after the click: "sent,
+  without confirmation"), a stop by the read after its 20 s of quiet.
+- The one case the 12/22 bytes of "request all" could hurt: an ISM8i reading
+  the announced 22 bytes, a "request all" left unanswered (a silent session,
+  2 s after it connected), then a stop clicked within the next seconds: its
+  first 10 bytes would be swallowed. Bounded: a stop sent less than 10 s
+  after a "request all" is sent again after 3 s. Try it on a real ISM8i.
 - The system pressure (`DPT_Value_Pres`): published in Pa as the reference
   (KNX 9.006, Home Assistant); values around 1.5 would mean bar.
 - The program codes (HVACMode 0-3, DHWMode 0/2/4) against the BM-2 display;
@@ -107,10 +112,13 @@ up to date at the end of every milestone.
   SetDatapointValue.Req is acknowledged at once (wolf_ism8 does the same); a
   datapoint of 0 or more than 4 bytes is skipped, the frame kept (wolf_ism8
   has such a frame from the field in its tests).
-- **"Request all"**: never periodic, never after a command. Sent only when a
-  new session brought no value within 2 s, on the button, when Gladys
-  reconnects and as a second read of a contradicted stop, at most once per
-  30 s and never while a stop sent less than 20 s ago is unconfirmed (its
+- **"Request all"**: never periodic. Grouped (one per kind, a later request
+  postponing it so it reads after every write) and retried until allowed:
+  ~5 s after a write, once the 20 s of quiet after a stop are over, when a
+  new session brought no value within 2 s, when Gladys reconnects, as a
+  second read of a contradicted stop, and on the button; at most once per
+  30 s (the link's own refusal is retried too) and never while a stop sent
+  less than 20 s ago is unconfirmed (its
   size field says 22 for 12 bytes: nothing must follow it closely). Kept
   byte for byte: the openHAB binding sends it at every connection followed
   by its acknowledgements, on real modules for years.
@@ -155,8 +163,9 @@ up to date at the end of every milestone.
   option, bound, read, busy setting, getConfig). Kept in `/data` (`stops`),
   sent at once when a session is up, else at the next session (3 attempts
   in all, an attempt the link did not write does not count and gives
-  "stop kept", never "sent"), sent again when no read confirmed it within
-  20 s, or 5 s apart while a read contradicts it before confirmation. Confirmed by a
+  "stop kept", never "sent"), sent again when nothing confirmed it 35 s
+  after sending (3 s when sent less than 10 s after a "request all"), or 5 s
+  apart while a read contradicts it before confirmation. Confirmed by a
   read; after that never sent again: lifted by two reads in a row of another
   program (changed at the boiler) or a user click on another program with
   the option (removed from /data before the bytes leave, put back if
@@ -170,6 +179,12 @@ up to date at the end of every milestone.
   configurations saved back to back are applied one after the other.
 - **Rate**: the publisher sends at most 250 states a minute, unchanged
   values skipped (`publishChangedStates`).
+- **Review round 2 (2026-10-28)**: B2 a link that runs but whose channel
+  never comes up for 3 min (another secret: /data unreadable at a start
+  then read again, a restored database) is started again, at most every
+  10 min; I6 grouped follow-up reads back (above); m1 the session read
+  retried when the spacing refuses it; m2 comment of `sendStop` fixed,
+  test of the quiet time given back; m3 the 12/22 case named in "To check".
 - **Review round 1 (2026-10-28)**: B1 stops out of the link's rate, a stop
   not written said "kept" and sent on the next session, resent after 20 s
   without confirmation; I1 no periodic or follow-up "request all", 1000

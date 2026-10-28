@@ -112,6 +112,10 @@ export class Ism8App {
     this.results = new Map();
     this.echoWaiters = new Set();
     this.lastReadAll = -Infinity;
+    this.lastForcedLink = -Infinity;
+    this.channelDownSince = undefined;
+    /** name -> { due, condition }: the automatic "request all" waiting for their turn. */
+    this.reads = new Map();
     this.lastCommand = undefined;
     this.lastStatus = undefined;
     this.publishedDevices = undefined;
@@ -230,7 +234,7 @@ export class Ism8App {
       await this.configUpdated(raw);
       if (epoch !== this.connectEpoch || this.stopped) return;
       // Fresh values for Gladys, which forgot them (once per 30 s at most).
-      this.readAll('connected');
+      this.requestRead('refresh', 0);
       return;
     }
   }
@@ -281,7 +285,7 @@ export class Ism8App {
     this.refreshCreated();
     this.publishedDevices = undefined;
     await this.publishDiscovery();
-    this.readAll('device');
+    this.requestRead('refresh', 0);
   }
 
   async scan() {
@@ -378,7 +382,13 @@ export class Ism8App {
    * on every startContainer, which drops the ISM8 session. The environment is
    * compared through a hash kept in /data, never the secret itself.
    */
-  async ensureLink() {
+  /**
+   * `force`: started again although it runs, because the channel has not come
+   * up for a long while (a link running with another secret than the one of
+   * /data: /data unreadable at a start then read again, a restored Gladys
+   * database). Spaced by the caller (tick), never in a loop.
+   */
+  async ensureLink({ force = false } = {}) {
     this.link.lastTry = this.clock();
     const generation = this.generation;
     try {
@@ -386,7 +396,8 @@ export class Ism8App {
       const hash = envHash(env);
       const container = await this.readLink(generation);
       if (generation !== this.generation) return;
-      if (container?.status !== 'running' || this.memory.linkEnv !== hash) {
+      if (force || container?.status !== 'running' || this.memory.linkEnv !== hash) {
+        if (force) this.logger.warn('The ISM8 link does not answer the channel: started again');
         await this.gladys.startContainer(LINK.name, { env });
         this.memory.linkEnv = hash;
         this.saveMemory();
@@ -423,8 +434,10 @@ export class Ism8App {
       logger: this.logger,
     });
     this.channel = channel;
+    this.channelDownSince = this.clock();
     channel.on('up', (info) => {
       if (generation !== this.generation) return;
+      this.channelDownSince = undefined;
       this.logger.info('Connected to the ISM8 link');
       const current = info?.session;
       this.setSession(
@@ -436,6 +449,7 @@ export class Ism8App {
     });
     channel.on('down', () => {
       if (generation !== this.generation) return;
+      this.channelDownSince = this.clock();
       this.logger.warn('Lost the ISM8 link, reconnecting');
       // Whatever was asked and not answered may have left: "sent, without confirmation".
       for (const resolve of this.results.values()) resolve(undefined);
@@ -470,17 +484,8 @@ export class Ism8App {
       // never asks): the kept stops first, and a "request all" only if nothing
       // came within 2 s.
       this.sendPendingStops('session');
-      this.scheduleSessionRead(this.session.id, TIMINGS.sessionRead);
+      this.requestRead('session', TIMINGS.sessionRead, () => this.values.size === 0);
     }
-  }
-
-  /** One "request all" if a new session brought no value (after the stops in flight). */
-  scheduleSessionRead(id, delay) {
-    this.later('sessionRead', delay, () => {
-      if (this.session?.id !== id || this.values.size > 0) return;
-      if (this.stopInFlight()) this.scheduleSessionRead(id, TIMINGS.stopResendSpacing);
-      else this.readAll('no values yet');
-    });
   }
 
   onLinkMessage(message) {
@@ -577,38 +582,105 @@ export class Ism8App {
    * stop sent less than 20 s ago is not confirmed (the "request all" frame
    * announces 22 bytes for 12: nothing must follow it closely).
    */
-  readAll(why) {
+  readAll(why, onAnswer) {
     const mono = this.clock();
-    if (!this.session || !this.channel?.connected) return false;
-    if (mono - this.lastReadAll < TIMINGS.refreshButton) return false;
-    if (this.stopInFlight(mono)) return false;
+    if (!this.session || !this.channel?.connected) return { sent: false, reason: 'session' };
+    const spacing = this.lastReadAll + TIMINGS.refreshButton - mono;
+    if (spacing > 0) return { sent: false, reason: 'spacing', wait: spacing };
+    const quiet = this.stopQuietUntil() - mono;
+    if (quiet > 0) return { sent: false, reason: 'stop', wait: quiet };
     this.lastReadAll = mono;
     this.logger.debug(`Reading every value (${why})`);
-    return this.channel.send({ type: 'readAll', seq: ++this.seq, session: this.session.id });
+    const seq = ++this.seq;
+    if (!this.channel.send({ type: 'readAll', seq, session: this.session.id })) {
+      return { sent: false, reason: 'session' };
+    }
+    this.results.set(seq, (answer) => {
+      // Refused by the link's spacing (it counts across restarts of this container).
+      if (answer?.sent === false && answer.reason === 'rate') this.lastReadAll = this.clock();
+      onAnswer?.(answer);
+    });
+    return { sent: true };
   }
 
-  /** A stop sent less than stopResend ago and not confirmed yet. */
+  /** The end of the quiet time after the last unconfirmed stop sent (monotonic). */
+  stopQuietUntil() {
+    let until = -Infinity;
+    for (const [id, stop] of this.memory.stops) {
+      if (stop.confirmed) continue;
+      const sent = this.stopState.get(id)?.lastSent ?? -Infinity;
+      until = Math.max(until, sent + TIMINGS.stopQuiet);
+    }
+    return until;
+  }
+
+  /** A stop sent less than 20 s ago and not confirmed yet. */
   stopInFlight(mono = this.clock()) {
-    return [...this.memory.stops].some(
-      ([id, stop]) =>
-        !stop.confirmed &&
-        mono - (this.stopState.get(id)?.lastSent ?? -Infinity) < TIMINGS.stopResend,
-    );
+    return mono < this.stopQuietUntil();
+  }
+
+  /**
+   * An automatic "request all", grouped: one per name, due `delay` from now
+   * (a later request postpones it, so that it reads after every write), sent
+   * when the spacing of 30 s and the quiet time after a stop allow, retried
+   * when the link refuses it for its own spacing. Dropped when the session
+   * ends or `condition` no longer holds.
+   */
+  requestRead(name, delay, condition = () => true) {
+    const due = this.clock() + delay;
+    const pending = this.reads.get(name);
+    if (pending && pending.due >= due) return;
+    this.reads.set(name, { due, condition, session: this.session?.id });
+    this.later(`read-${name}`, delay, () => this.fireRead(name));
+  }
+
+  fireRead(name) {
+    const read = this.reads.get(name);
+    if (!read) return;
+    if (!this.session || this.session.id !== read.session || !read.condition()) {
+      this.reads.delete(name);
+      return;
+    }
+    const result = this.readAll(name, (answer) => {
+      if (answer?.sent === false && answer.reason === 'rate' && !this.reads.has(name)) {
+        this.reads.set(name, read);
+        this.later(`read-${name}`, TIMINGS.refreshButton, () => this.fireRead(name));
+      }
+    });
+    if (result.wait > 0) {
+      // Not yet (spacing, or the quiet time after a stop): exactly when it allows.
+      this.later(`read-${name}`, result.wait + 100, () => this.fireRead(name));
+      return;
+    }
+    this.reads.delete(name);
   }
 
   async refreshButton() {
     await this.boot();
-    const mono = this.clock();
-    if (!this.session || !this.channel?.connected) return REFRESH.noSession;
-    const wait = this.lastReadAll + TIMINGS.refreshButton - mono;
-    if (wait > 0) return REFRESH.tooSoon(Math.ceil(wait / 1000));
-    if (this.stopInFlight(mono)) return REFRESH.stopInFlight;
-    return this.readAll('button') ? REFRESH.sent : REFRESH.noSession;
+    const result = this.readAll('button');
+    if (result.sent) return REFRESH.sent;
+    if (result.reason === 'spacing') return REFRESH.tooSoon(Math.ceil(result.wait / 1000));
+    if (result.reason === 'stop') return REFRESH.stopInFlight;
+    return REFRESH.noSession;
   }
 
   async tick() {
     if (this.stopped) return;
     const mono = this.clock();
+    if (
+      this.configRead &&
+      !this.config.problem &&
+      this.link.status === 'running' &&
+      this.channelDownSince !== undefined &&
+      mono - this.channelDownSince >= TIMINGS.linkSilent &&
+      mono - this.lastForcedLink >= TIMINGS.linkForceSpacing
+    ) {
+      // Running, but the channel never came up for minutes (beyond the delays
+      // of Docker after a restart): another secret, most likely.
+      this.lastForcedLink = mono;
+      await this.ensureLink({ force: true });
+      return;
+    }
     if (
       this.configRead &&
       !this.config.problem &&
@@ -664,7 +736,8 @@ export class Ism8App {
       this.results.set(seq, (message) => {
         this.timers.clearTimeout(timer);
         if (message?.sent === false && this.memory.stops.get(id) === stop) {
-          // Not written: the attempt is given back and the stop leaves again now.
+          // Not written: the attempt is given back, and the quiet time with it
+          // (a read contradicting it may send it again at once).
           stop.attempts = Math.max(0, stop.attempts - 1);
           state.lastSent = -Infinity;
           this.saveMemory();
@@ -674,8 +747,14 @@ export class Ism8App {
         resolve(message);
       });
     });
-    // Not confirmed by a read within 20 s: sent again (3 sendings in all).
-    this.later(`stopResend-${id}`, TIMINGS.stopResend, () => {
+    // A grouped read once the quiet time is over confirms it; still not
+    // confirmed 35 s after sending (that read included): sent again (3 in all).
+    // Sent less than 10 s after a "request all" (whose 12 bytes announce 22:
+    // an ISM8 reading 22 would swallow the start of this stop): sent again
+    // after 3 s already if not confirmed.
+    this.requestRead('followUp', TIMINGS.stopQuiet + 1000);
+    const shadowed = state.lastSent - this.lastReadAll < TIMINGS.readAllShadow;
+    this.later(`stopResend-${id}`, shadowed ? TIMINGS.stopShadowResend : TIMINGS.stopResend, () => {
       if (
         this.memory.stops.get(id) === stop &&
         !stop.confirmed &&
@@ -728,7 +807,7 @@ export class Ism8App {
       this.updateStatus();
     } else {
       // A second read, a while later (one "request all" per 30 s at most).
-      this.later(`contra-${dp.id}`, TIMINGS.contraRead, () => this.readAll('stop check'));
+      this.requestRead('followUp', TIMINGS.contraRead);
     }
   }
 
@@ -926,6 +1005,8 @@ export class Ism8App {
       throw this.refuse(COMMAND.why.link);
     }
     if (guard) this.stopState.delete(dp.id);
+    // Grouped follow-up read, in case the ISM8 does not report the value back.
+    this.requestRead('followUp', TIMINGS.followUp);
     const echo = this.waitEcho(dp, wanted, after, received + TIMINGS.commandAnswer);
     const answer = await write.result;
     if (answer && answer.sent === false) {

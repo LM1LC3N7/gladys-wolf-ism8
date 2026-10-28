@@ -69,8 +69,19 @@ export const TIMINGS = Object.freeze({
   commandAnswer: 3400,
   /** A stop resent at most this often when a read contradicts it before it was confirmed. */
   stopResendSpacing: 5 * SECOND,
-  /** A stop not confirmed by a read within this is sent again (3 sendings in all). */
-  stopResend: 20 * SECOND,
+  /** No "request all" this long after an unconfirmed stop was sent (its 12/22 bytes). */
+  stopQuiet: 20 * SECOND,
+  /** A stop not confirmed this long after sending (a read at ~21 s included): sent again. */
+  stopResend: 35 * SECOND,
+  /** A stop sent this soon after a "request all" is sent again after stopShadowResend. */
+  readAllShadow: 10 * SECOND,
+  stopShadowResend: 3 * SECOND,
+  /** A grouped read this long after a write (the ISM8 may not report it back). */
+  followUp: 5 * SECOND,
+  /** A link running whose channel never comes up for this long is started again... */
+  linkSilent: 3 * MINUTE,
+  /** ...at most this often. */
+  linkForceSpacing: 10 * MINUTE,
   /** A new ISM8 session without any value after this: one "request all". */
   sessionRead: 2 * SECOND,
   /** A confirmed stop contradicted once: read again this long after. */
