@@ -21,9 +21,9 @@ fonctionnalité par valeur reçue :
 - états (brûleur, pompes, vannes, défaut, sorties) en lecture seule ;
 - états de fonctionnement et programmes en texte (jamais publiés comme une
   mesure 0), dernier code de défaut ;
+- pression de l’installation, en Pa (l’unité de l’interface Wolf) ;
 - pourcentages (brûleur, modulation, ventilation), corrections de consigne
-  (K), débits (l/h) et pression de l’installation (valeur brute telle que
-  l’ISM8i l’envoie) en valeurs simples, l’unité dans le nom ;
+  (K) et débits (l/h) en valeurs simples, l’unité dans le nom ;
 - la consigne d’eau chaude et les programmes de chauffage et d’eau chaude du
   circuit direct et des circuits mélangés 1 à 3, modifiables (voir plus bas).
 
@@ -49,7 +49,7 @@ port sur la machine.
 4. Dans la page web de l’ISM8i, indiquez comme adresse du serveur l’adresse IP
    de la machine Gladys sur votre réseau, et ce port.
 5. L’état de l’intégration passe à « ISM8i connecté » dès la première
-   connexion ; toutes les valeurs sont alors demandées au module.
+   connexion ; l’ISM8i envoie alors de lui-même toutes ses valeurs.
 
 ### Le réseau : ce qui a été vérifié
 
@@ -65,7 +65,7 @@ Vérifié dans un Gladys de test en Docker (2026-10-28) : rien n’écoute avant
 l’enregistrement de l’adresse ; une fois enregistrée, le port est publié,
 une connexion venue d’une autre adresse du réseau arrive avec **sa vraie
 adresse source** (Docker la garde pour le trafic venu du réseau) et reçoit
-l’accusé de réception et la demande de toutes les valeurs ; une connexion
+son accusé de réception ; une connexion
 partie de la machine Gladys elle-même arrive au contraire avec l’adresse de
 la passerelle Docker.
 
@@ -77,14 +77,19 @@ Conséquences :
   et l’état indique l’adresse vue. Sur Docker Desktop (Mac, Windows) ou
   Docker sans root, Docker peut remplacer l’adresse source : l’état montre alors
   des connexions refusées depuis une adresse interne ; désactivez l’option
-  dans ce cas seulement (toute machine du réseau peut alors envoyer des
-  valeurs à la place de l’ISM8i) ;
+  dans ce cas seulement : toute machine du réseau peut alors prendre la place
+  de l’ISM8i (qui est déconnecté), envoyer de fausses valeurs, recevoir les
+  écritures destinées à la chaudière, arrêts compris, et les confirmer ou les
+  contredire ;
 - par Gladys Plus ou un proxy, l’adresse affichée par le navigateur n’est pas
   celle que l’ISM8i doit joindre : utilisez l’adresse locale de la machine.
-- quand l’intégration redémarre (mise à jour, redémarrage de Gladys), Gladys
-  relance aussi le récepteur : la connexion de l’ISM8i est coupée, l’ISM8i se
-  reconnecte de lui-même, et l’intégration retrouve le récepteur en 30 s
-  environ (le temps que Docker oublie l’ancien conteneur).
+- le récepteur n’est relancé que s’il s’est arrêté ou si l’adresse ou la
+  vérification de l’expéditeur change (chaque lancement coupe la connexion de
+  l’ISM8i). Quand l’intégration elle-même redémarre (mise à jour, redémarrage
+  de Gladys), Gladys relance aussi le récepteur : l’ISM8i se reconnecte de
+  lui-même, et l’intégration a retrouvé le récepteur en 20 à 50 s lors de
+  l’essai (le temps que Docker oublie l’ancien conteneur), jusqu’à une minute
+  environ.
 
 ## Modifier les réglages
 
@@ -100,9 +105,9 @@ Désactivé par défaut. Avec **Autoriser la modification des réglages** :
 Une commande part seulement si l’option est active à son arrivée **et** juste
 avant l’envoi, si l’ISM8i est connecté, et si la valeur actuelle a été reçue
 pendant sa connexion en cours. Elle est dite appliquée seulement quand
-l’ISM8i renvoie la nouvelle valeur ; sinon « envoyée, sans confirmation »,
-et toutes les valeurs sont redemandées 5 et 20 s plus tard. Le résultat
-s’affiche dans l’état de l’intégration.
+l’ISM8i renvoie la nouvelle valeur (il signale de lui-même chaque
+changement) ; sinon « envoyée, sans confirmation ». Le résultat s’affiche
+dans l’état de l’intégration.
 
 Jamais écrits : puissances et températures imposées des chaudières, programmes
 horaires, charge d’eau chaude ponctuelle, ventilation, et toute autre valeur.
@@ -114,17 +119,21 @@ chauffage ou l’eau chaude d’un circuit est toujours accepté : option désac
 plafond, valeur pas encore lue, autre commande en cours, configuration pas
 encore lue dans Gladys, rien ne le retient. Il est gardé dans `/data` et :
 
-- part tout de suite si l’ISM8i est connecté ;
-- sinon part dès la prochaine connexion de l’ISM8i (et, après un redémarrage
-  de l’intégration, dès que le récepteur répond, avant même la lecture de la
-  configuration) ;
-- est renvoyé, espacé de 5 s, si une valeur lue le contredit avant d’avoir
-  été confirmé, 3 envois au plus en tout ; au-delà, l’état demande de
-  vérifier la chaudière.
+- part tout de suite si l’ISM8i est connecté, sans jamais être retenu par
+  les limites du récepteur (elles ne s’appliquent pas à lui) ;
+- sinon part dès la prochaine connexion de l’ISM8i, sans attendre la
+  configuration (après un redémarrage de l’intégration aussi, dès que
+  l’ISM8i est revenu sur le récepteur) ;
+- est renvoyé si aucune valeur lue ne le confirme dans les 20 s, ou espacé de
+  5 s si une valeur lue le contredit, 3 envois au plus en tout ; au-delà,
+  l’état demande de vérifier la chaudière.
 
-Seuls cas où il ne part pas tout de suite : l’ISM8i n’est pas connecté, ou le
-récepteur ne tourne pas (adresse pas encore enregistrée) ; il attend alors
-dans `/data`. Une fois confirmé, il n’est plus jamais renvoyé : un programme
+Seuls cas où il ne part pas tout de suite : l’ISM8i n’est pas connecté, sa
+connexion vient de changer à cet instant (l’arrêt part alors aussitôt sur la
+nouvelle), ou le récepteur ne tourne pas (adresse pas encore enregistrée). Il
+attend alors dans `/data` et l’état dit « arrêt gardé », jamais « envoyée ».
+Aucune demande de toutes les valeurs ne part dans les 20 s d’un arrêt pas
+encore confirmé. Une fois confirmé, il n’est plus jamais renvoyé : un programme
 changé ensuite sur la chaudière ou dans l’application Wolf, lu deux fois de
 suite, lève l’arrêt sans être combattu. Choisir un autre programme dans
 Gladys (option active) le lève aussi. Le temps seul ne le lève jamais.
@@ -141,8 +150,11 @@ l’arrêt).
 - Le récepteur accepte 4 connexions au plus, une seule session ISM8 à la fois
   (une nouvelle connexion de l’ISM8i remplace l’ancienne), des trames de
   2048 octets et 300 valeurs au plus, vérifiées entières ; une trame mal
-  formée, incomplète depuis 5 s ou un flot de plus de 400 trames en 10 s
-  ferme la connexion.
+  formée, incomplète depuis 5 s ou un flot de plus de 1000 trames en 10 s
+  ferme la connexion (un vidage complet en fait environ 300) ; une valeur de 0
+  ou de plus de 4 octets est ignorée.
+- Le récepteur n’écrit vers l’ISM8i que les consignes d’eau chaude (20 à
+  65 °C) et les codes de programme proposés ici, quoi qu’on lui demande.
 - Le canal entre le récepteur et l’intégration passe par le réseau privé de
   l’intégration, avec une preuve mutuelle d’un secret généré par
   l’intégration.
@@ -150,8 +162,10 @@ l’arrêt).
 ## Bouton « Relire toutes les valeurs »
 
 Demande à l’ISM8i connecté de renvoyer toutes ses valeurs (au plus toutes les
-30 s). L’intégration le fait aussi à chaque connexion, toutes les 5 minutes
-et après chaque commande.
+30 s, jamais dans les 20 s d’un arrêt pas encore confirmé). L’intégration le
+demande aussi quand Gladys se reconnecte, pour afficher des valeurs fraîches ;
+sinon l’ISM8i envoie toutes ses valeurs à sa connexion, puis chaque
+changement.
 
 ## Dépannage
 
@@ -163,8 +177,8 @@ et après chaque commande.
   l’adresse).
 - **Une valeur manque** : l’ISM8i n’envoie que ce que votre installation
   possède ; une valeur hors de sa plage plausible n’est jamais publiée.
-- **Pression étrange** : la pression est publiée telle que l’ISM8i l’envoie ;
-  son unité réelle reste à confirmer sur un vrai module.
+- **Pression étrange** : la pression est publiée en Pa comme le dit
+  l’interface Wolf ; signalez-nous si un vrai module envoie des bars.
 
 ## Crédits
 

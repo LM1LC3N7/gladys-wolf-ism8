@@ -5,7 +5,7 @@
 // Schmiedchen, `ism8_helper_functions.py`).
 //
 // Kinds: temperature (°C), room temperature, temperature difference (K),
-// percentage, pressure (raw, as the ISM8 sends it: see TODO.md), power (kW),
+// percentage, pressure (Pa, KNX 9.006 as wolf_ism8 says), power (kW),
 // flow (l/h), binary state, mode (a text), error code (a text). Not shown in
 // this version: dates, times, energy counters, the ventilation air flows,
 // the BM-2 detection bit fields and the keep-alive (767).
@@ -289,6 +289,25 @@ export function encodeCommand(dp, value) {
     throw new RangeError('unknown program');
   }
   return Buffer.from([code]);
+}
+
+/**
+ * The last check before bytes leave for the ISM8 (in the link): a writable
+ * datapoint of COMMANDS, a whole hot water setpoint from 20 to 65 °C, or a
+ * program code offered here. Returns { ok, stop } (stop: the standby code).
+ */
+export function checkWrite(id, bytes) {
+  const dp = DATAPOINTS.get(id);
+  if (!dp?.command || !Buffer.isBuffer(bytes)) return { ok: false, stop: false };
+  if (dp.command === 'dhw-setpoint') {
+    const value = decodeFloat(bytes);
+    const ok = Number.isInteger(value) && value >= DHW_SETPOINT.min && value <= DHW_SETPOINT.max;
+    return { ok, stop: false };
+  }
+  if (bytes.length !== 1) return { ok: false, stop: false };
+  const codes = SELECTABLE[dp.command];
+  const ok = Object.values(codes).includes(bytes[0]);
+  return { ok, stop: ok && bytes[0] === codes[STOP[dp.command]] };
 }
 
 /** Whether a decoded value is the one a command asked for. */

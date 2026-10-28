@@ -89,6 +89,21 @@ test('frames: parsed whole; anything malformed is refused', () => {
   broken.push(trailing);
   for (const bytes of broken) assert.throws(() => parseFrame(bytes), FrameError);
   assert.throws(() => parseFrame(trailing), /trailing/);
+  // 301 datapoints: refused.
+  const many = valuesFrame(Array.from({ length: 301 }, (_, i) => [1 + i, byte(0)]));
+  assert.throws(() => parseFrame(many), /count/);
+  // A datapoint of 5 bytes is skipped, the others kept.
+  const five = parseFrame(
+    valuesFrame([
+      [4, temp(60)],
+      [999, Buffer.alloc(5)],
+      [9, byte(1)],
+    ]),
+  );
+  assert.deepEqual(
+    five.items.map((i) => i.id),
+    [4, 9],
+  );
   // Another service, valid: ignored, not refused.
   const other = Buffer.from(frame.subarray(0, 12));
   other[5] = 12;
@@ -239,6 +254,7 @@ test('/data: only known keys of the right shape; a time in the future is replace
   assert.deepEqual(memory.stops.get(57), { at: now, attempts: 3, confirmed: false });
   assert.deepEqual(serializeMemory(memory), {
     token: 'f'.repeat(43),
+    linkEnv: undefined,
     seen: [4, 57],
     stops: { 57: { at: now, attempts: 3, confirmed: false } },
   });

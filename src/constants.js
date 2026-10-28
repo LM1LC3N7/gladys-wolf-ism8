@@ -26,14 +26,16 @@ export const DHW_CAP = Object.freeze({ default: 65, min: 20, max: 65 });
 export const LIMITS = Object.freeze({
   /** Open TCP connections on the ISM8 port, all sources together. */
   linkSockets: 4,
-  /** Frames a session may send per framesWindow. */
-  frames: 400,
+  /** Frames a session may send per framesWindow (a full dump is ~300 frames). */
+  frames: 1000,
   framesWindow: 10 * SECOND,
   /** An incomplete frame older than this closes the connection. */
   frameStall: 5 * SECOND,
   /** Writes and "read everything" of the main container per linkWritesWindow. */
   linkWrites: 20,
   linkWritesWindow: 10 * SECOND,
+  /** "Request all" at most this often, whoever asks. */
+  linkReadAllSpacing: 30 * SECOND,
   /** Messages the link keeps while the main container is away. */
   linkQueue: 500,
   /** A refused connection is told to the main container at most this often. */
@@ -54,14 +56,10 @@ export const TIMINGS = Object.freeze({
   tick: 10 * SECOND,
   flushInterval: SECOND,
   stateHeartbeat: 30 * MINUTE,
-  /** A full read of the ISM8 while the session lasts. */
-  refresh: 5 * MINUTE,
-  /** A "read everything" button click at most this often. */
+  /** "Request all" at most this often (button, Gladys reconnecting, a second read of a stop). */
   refreshButton: 30 * SECOND,
   /** Values older than this (kept by the link while this container was away) are dropped. */
   valueMaxAge: MINUTE,
-  /** A value is used by a decision only if received in the current session, within this. */
-  valueFresh: 15 * MINUTE,
   /** The link is started again at most this often while it is not running. */
   linkRetry: MINUTE,
   /** getConfig() retried after a failure: 5 s, 10 s, 30 s, 1 min, then every 2 min. */
@@ -69,10 +67,12 @@ export const TIMINGS = Object.freeze({
   /** A command: sent within `commandSend` of the click, answered within `commandAnswer`. */
   commandSend: 2500,
   commandAnswer: 3400,
-  /** After a write without its echo: a full read this long after the write. */
-  echoRead: 1200,
-  /** Follow-up full reads after a command. */
-  followUps: [5 * SECOND, 20 * SECOND],
   /** A stop resent at most this often when a read contradicts it before it was confirmed. */
   stopResendSpacing: 5 * SECOND,
+  /** A stop not confirmed by a read within this is sent again (3 sendings in all). */
+  stopResend: 20 * SECOND,
+  /** A new ISM8 session without any value after this: one "request all". */
+  sessionRead: 2 * SECOND,
+  /** A confirmed stop contradicted once: read again this long after. */
+  contraRead: 5 * SECOND,
 });

@@ -46,7 +46,7 @@ export const DP_NAMES = Object.freeze({
   'Status Heizkreispumpe': t('Heating circuit pump', 'Pompe du circuit de chauffage'),
   'Status Speicherladepumpe': t('Tank charging pump', 'Pompe de charge du ballon'),
   'Status 3W-Umschaltventil': t('Three-way valve', 'Vanne trois voies'),
-  Anlagendruck: t('System pressure (raw value)', 'Pression de l’installation (valeur brute)'),
+  Anlagendruck: t('System pressure', 'Pression de l’installation'),
   Raumtemperatur: t('Room temperature', 'Température ambiante'),
   Warmwassersolltemperatur: t('Hot water setpoint', 'Consigne eau chaude'),
   'Programmwahl Heizkreis': t('Heating program', 'Programme de chauffage'),
@@ -285,6 +285,10 @@ export const REFRESH = Object.freeze({
       `Asked less than 30 s ago: try again in ${seconds} s.`,
       `Demandé il y a moins de 30 s : réessayez dans ${seconds} s.`,
     ),
+  stopInFlight: t(
+    'A stop is waiting for its confirmation: try again in 20 s.',
+    'Un arrêt attend sa confirmation : réessayez dans 20 s.',
+  ),
   noSession: t(
     'The ISM8i is not connected: nothing asked.',
     'L’ISM8i n’est pas connecté : rien demandé.',

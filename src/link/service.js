@@ -17,9 +17,15 @@
 //     (src/ism8/protocol.js); a stream that does not start with the ISM8
 //     header, a size out of bounds or a malformed frame closes the
 //     connection; a frame left incomplete for 5 s closes it too;
-//   - 400 frames per 10 s at most (a full dump of the ISM8 is a few dozen);
-//     over that the connection is closed;
-//   - 20 writes per 10 s at most from the main container.
+//   - 1000 frames per 10 s at most (a full dump of the ISM8 is about 300
+//     frames, one datapoint each, as the field captures show); over that the
+//     connection is closed;
+//   - 20 writes per 10 s at most from the main container, and one "request
+//     all" per 30 s; a stop (the standby program, `stop: true`) is never
+//     counted nor refused by these limits, only without an ISM8 session;
+//   - the last check before the bytes leave: only the writable datapoints of
+//     src/ism8/datapoints.js, a hot water setpoint of 20 to 65 °C, a program
+//     code offered by the integration (checkWrite).
 //
 // Every valid SetDatapointValue.Req is acknowledged at once, as wolf_ism8
 // does (the ISM8 repeats a frame left unacknowledged), and its datapoints are
@@ -45,6 +51,7 @@ import {
   ackFrame,
   writeFrame,
 } from '../ism8/protocol.js';
+import { checkWrite } from '../ism8/datapoints.js';
 
 const HEX = /^(?:[0-9a-f]{2}){1,4}$/;
 
@@ -69,6 +76,7 @@ export async function startLinkService({
   let lastRefusedNotice = -Infinity;
   let refusedSince = 0;
   const writes = [];
+  let lastReadAll = -Infinity;
 
   const at = () => new Date(now()).toISOString();
 
@@ -91,34 +99,38 @@ export async function startLinkService({
       answer({ sent: false, reason: 'unknown' });
       return;
     }
+    let frame;
+    let stop = false;
+    if (message.type === 'readAll') {
+      frame = REQUEST_ALL;
+    } else {
+      const { id, hex } = message;
+      const bytes = typeof hex === 'string' && HEX.test(hex) ? Buffer.from(hex, 'hex') : undefined;
+      const check = Number.isInteger(id) ? checkWrite(id, bytes) : { ok: false };
+      // A message saying "stop" must really be a standby program.
+      if (!check.ok || (message.stop === true && !check.stop)) {
+        answer({ sent: false, reason: 'invalid' });
+        return;
+      }
+      stop = message.stop === true;
+      frame = writeFrame(id, bytes);
+    }
     const mono = clock();
-    while (writes.length > 0 && mono - writes[0] >= LIMITS.linkWritesWindow) writes.shift();
-    if (writes.length >= LIMITS.linkWrites) {
-      answer({ sent: false, reason: 'rate' });
-      return;
+    if (!stop) {
+      while (writes.length > 0 && mono - writes[0] >= LIMITS.linkWritesWindow) writes.shift();
+      const readAllTooSoon =
+        message.type === 'readAll' && mono - lastReadAll < LIMITS.linkReadAllSpacing;
+      if (writes.length >= LIMITS.linkWrites || readAllTooSoon) {
+        answer({ sent: false, reason: 'rate' });
+        return;
+      }
     }
     if (!session || message.session !== session.id || session.socket.destroyed) {
       answer({ sent: false, reason: 'session' });
       return;
     }
-    let frame;
-    if (message.type === 'readAll') {
-      frame = REQUEST_ALL;
-    } else {
-      const { id, hex } = message;
-      if (
-        !Number.isInteger(id) ||
-        id < 1 ||
-        id > 0xffff ||
-        typeof hex !== 'string' ||
-        !HEX.test(hex)
-      ) {
-        answer({ sent: false, reason: 'invalid' });
-        return;
-      }
-      frame = writeFrame(id, Buffer.from(hex, 'hex'));
-    }
-    writes.push(mono);
+    if (!stop) writes.push(mono);
+    if (message.type === 'readAll') lastReadAll = mono;
     // Handed to the kernel: from here the bytes may have left.
     session.socket.write(frame);
     answer({ sent: true, at: at() });
@@ -220,6 +232,7 @@ export async function startLinkService({
         }
         if (parsed.service !== 'values') continue;
         socket.write(ackFrame(parsed.start));
+        if (parsed.items.length === 0) continue;
         channel.send({
           type: 'values',
           session: current.id,

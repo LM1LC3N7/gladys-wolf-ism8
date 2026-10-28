@@ -102,8 +102,8 @@
         "fr": "Vérifier l’expéditeur"
       },
       "description": {
-        "en": "Accept the connection only from the address of the ISM8i. Turn it off only if the status says connections come from another address because Docker hides the real one on this machine: then any machine of your network can send values in its place.",
-        "fr": "N’accepter la connexion que depuis l’adresse de l’ISM8i. À désactiver seulement si l’état dit que les connexions viennent d’une autre adresse parce que Docker masque la vraie sur cette machine : toute machine de votre réseau peut alors envoyer des valeurs à sa place."
+        "en": "Accept the connection only from the address of the ISM8i. Turn it off only if the status says connections come from another address because Docker hides the real one on this machine: then any machine of your network can take the place of the ISM8i, send false values, receive the writes meant for the boiler (stops included) and confirm or contradict them.",
+        "fr": "N’accepter la connexion que depuis l’adresse de l’ISM8i. À désactiver seulement si l’état dit que les connexions viennent d’une autre adresse parce que Docker masque la vraie sur cette machine : toute machine de votre réseau peut alors prendre la place de l’ISM8i, envoyer de fausses valeurs, recevoir les écritures destinées à la chaudière (arrêts compris) et les confirmer ou les contredire."
       },
       "required": false,
       "default": true
@@ -185,8 +185,8 @@
         "fr": "Relire toutes les valeurs"
       },
       "description": {
-        "en": "Asks the connected ISM8i to send every value again (at most every 30 s).",
-        "fr": "Demande à l’ISM8i connecté de renvoyer toutes les valeurs (au plus toutes les 30 s)."
+        "en": "Asks the connected ISM8i to send every value again (at most every 30 s, never within 20 s of a stop not yet confirmed).",
+        "fr": "Demande à l’ISM8i connecté de renvoyer toutes les valeurs (au plus toutes les 30 s, jamais dans les 20 s d’un arrêt pas encore confirmé)."
       },
       "timeout_seconds": 10
     }

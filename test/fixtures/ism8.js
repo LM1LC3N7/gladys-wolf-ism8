@@ -46,7 +46,18 @@ export function valuesFrame(items, { command = 0x03 } = {}) {
   );
   const start = items[0][0];
   const body = Buffer.concat([
-    Buffer.from([0x04, 0x00, 0x00, 0x00, 0xf0, 0x06, start >> 8, start & 0xff, 0x00, items.length]),
+    Buffer.from([
+      0x04,
+      0x00,
+      0x00,
+      0x00,
+      0xf0,
+      0x06,
+      start >> 8,
+      start & 0xff,
+      items.length >> 8,
+      items.length & 0xff,
+    ]),
     ...parts,
   ]);
   const size = 6 + body.length;

@@ -19,9 +19,9 @@
 // being the stop), refused unless the configuration allows writes
 // (src/app.js), standby excepted.
 //
-// Units only from the core's DEVICE_FEATURE_UNITS_BY_CATEGORY: °C, kW. The
-// percentages, the temperature differences, the flows and the pressure (its
-// unit is not sure: see TODO.md) are `unknown/decimal`, the unit in the name.
+// Units only from the core's DEVICE_FEATURE_UNITS_BY_CATEGORY: °C, kW, Pa
+// (the system pressure, as the reference). The percentages, the temperature
+// differences and the flows are `unknown/decimal`, the unit in the name.
 // -----------------------------------------------------------------------------
 
 import {
@@ -101,6 +101,15 @@ export function definitionOf(dp) {
         unit: U.KILOWATT,
         min: -1000,
         max: 1000,
+      });
+    case 'pressure':
+      // DPT_Value_Pres: pascal, as KNX 9.006, wolf_ism8 and Home Assistant say.
+      return sensor({
+        category: C.PRESSURE_SENSOR,
+        type: T.SENSOR.DECIMAL,
+        unit: U.PASCAL,
+        min: 0,
+        max: 1_000_000,
       });
     case 'binary':
       return sensor({ category: C.UNKNOWN, type: T.SENSOR.BINARY, min: 0, max: 1 });

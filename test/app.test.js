@@ -77,7 +77,11 @@ test('the address removed: the link is stopped (nothing listens)', async (t) => 
 test('values: decoded, published, devices discovered with their features; texts never as 0', async (t) => {
   const { gladys, ism8Up, values, advance, channel } = await setup(t);
   await ism8Up();
-  assert.equal(channel().readAlls(), 1, 'a full read at the new session');
+  assert.equal(
+    channel().readAlls(),
+    0,
+    'no "request all": the ISM8 sends everything when it connects',
+  );
   await values([
     [4, temp(61)],
     [8, temp(-3.2)],
@@ -211,14 +215,14 @@ test('hot water: above 65 °C or the configured ceiling is refused, whatever the
   assert.equal(ctx.channel().writes().length, 0);
 });
 
-test('a write without its echo: "sent, without confirmation", follow-up reads', async (t) => {
+test('a write without its echo: "sent, without confirmation", no "request all" after it', async (t) => {
   const ctx = await ready(t);
   const before = ctx.channel().readAlls();
   const ack = await ctx.command('direct-circuit', 56, 60);
   assert.equal(ack.success, true);
   assert.match(status(ctx.gladys).message.en, /sent, without confirmation/);
   await ctx.advance(25 * SECOND);
-  assert.ok(ctx.channel().readAlls() >= before + 2, 'echo read and follow-ups');
+  assert.equal(ctx.channel().readAlls(), before);
 });
 
 test('a read back equal to the value before is not a confirmation', async (t) => {
@@ -504,12 +508,23 @@ test('the refresh button: asks every value, at most every 30 s', async (t) => {
   assert.equal(ctx.channel().readAlls(), before + 1);
 });
 
-test('a full read every 5 minutes while the session lasts', async (t) => {
+test('no periodic "request all": the ISM8 reports its changes by itself', async (t) => {
   const ctx = await setup(t);
   await ctx.ism8Up();
-  const before = ctx.channel().readAlls();
+  await ctx.values([[4, temp(50)]]);
   await ctx.advance(16 * MINUTE);
-  assert.equal(ctx.channel().readAlls() - before, 3);
+  assert.equal(ctx.channel().readAlls(), 0);
+});
+
+test('a session without any value after 2 s: one "request all", no more', async (t) => {
+  const ctx = await setup(t);
+  await ctx.ism8Up();
+  await ctx.advance(1500);
+  assert.equal(ctx.channel().readAlls(), 0);
+  await ctx.advance(1000);
+  assert.equal(ctx.channel().readAlls(), 1);
+  await ctx.advance(10 * MINUTE);
+  assert.equal(ctx.channel().readAlls(), 1);
 });
 
 test('a refused connection is shown in the status (address only)', async (t) => {
@@ -554,8 +569,6 @@ test('a value of another session is never fresh', async (t) => {
   assert.equal(ctx.app.freshValue(56), 50);
   ctx.app.values.set(56, { ...entry, session: entry.session + 1 });
   assert.equal(ctx.app.freshValue(56), undefined);
-  ctx.app.values.set(56, { ...entry, mono: ctx.clock.monotonic() - 16 * MINUTE });
-  assert.equal(ctx.app.freshValue(56), undefined, 'too old');
 });
 
 test('a confirmed stop is not sent again at the next session', async (t) => {
@@ -683,4 +696,75 @@ test('the channel secret never reaches the logs nor the status', async (t) => {
   assert.ok(!ctx.logs.some((line) => line.includes(token)));
   assert.ok(!JSON.stringify(ctx.gladys.fake.connectionStatuses).includes(token));
   assert.ok(!JSON.stringify(ctx.gladys.fake.discoveredDevices).includes(token));
+});
+
+test('a stop not confirmed is sent again after 20 s, 3 sendings in all, never more at the next session', async (t) => {
+  const ctx = await setup(t);
+  await ctx.ism8Up(1);
+  await ctx.command('direct-circuit', 57, 'standby');
+  await ctx.advance(15 * SECOND);
+  assert.equal(ctx.channel().writes(57).length, 1);
+  await ctx.advance(6 * SECOND);
+  assert.equal(ctx.channel().writes(57).length, 2);
+  await ctx.advance(60 * SECOND);
+  assert.equal(ctx.channel().writes(57).length, 3);
+  await ctx.ism8Up(2);
+  await ctx.advance(60 * SECOND);
+  assert.equal(ctx.channel().writes(57).length, 3, 'exhausted: not sent again at the next session');
+  assert.ok(
+    ctx
+      .channel()
+      .writes(57)
+      .every((w) => w.stop === true),
+  );
+});
+
+test('a stop the link did not write is said kept, never "sent", and leaves on the new session', async (t) => {
+  const ctx = await setup(t);
+  await ctx.ism8Up(1);
+  ctx.channel().answer = () => ({ sent: false, reason: 'session' });
+  const ack = await ctx.command('direct-circuit', 57, 'standby');
+  assert.deepEqual(ack.data, { kept: true });
+  assert.match(status(ctx.gladys).message.en, /stop kept/);
+  assert.equal(ctx.store.data.stops['57'].attempts, 0);
+  ctx.channel().answer = () => ({ sent: true });
+  await ctx.ism8Up(2);
+  assert.equal(ctx.channel().writes(57).at(-1).session, 2);
+});
+
+test('no "request all" while a stop waits for its confirmation', async (t) => {
+  const ctx = await setup(t);
+  await ctx.ism8Up();
+  await ctx.command('direct-circuit', 57, 'standby');
+  const ack = await ctx.gladys.fake.action('refresh');
+  assert.match(ack.data.message.en, /waiting for its confirmation/);
+  assert.equal(ctx.channel().readAlls(), 0);
+});
+
+test('the link is started only when it does not run or its environment changed', async (t) => {
+  const ctx = await setup(t);
+  assert.equal(startCalls(ctx.gladys).length, 1);
+  await ctx.app.gladysConnected();
+  await ctx.gladys.fake.configUpdated({ ...CONFIG, language: 'en' });
+  await ctx.advance(3 * MINUTE);
+  assert.equal(startCalls(ctx.gladys).length, 1, 'reconnection, language, rounds: no restart');
+  await ctx.gladys.fake.configUpdated({ ...CONFIG, check_source: false });
+  assert.equal(startCalls(ctx.gladys).length, 2);
+  ctx.gladys.fake.containers[0].status = 'exited';
+  await ctx.advance(71 * SECOND);
+  assert.equal(startCalls(ctx.gladys).length, 3, 'a link that stopped is started again');
+});
+
+test('Gladys reconnecting asks no "request all" while a stop waits for its confirmation', async (t) => {
+  const ctx = await setup(t);
+  await ctx.ism8Up();
+  await ctx.values([[4, temp(50)]]);
+  await ctx.command('direct-circuit', 57, 'standby');
+  await ctx.app.gladysConnected();
+  await ctx.advance(100);
+  assert.equal(ctx.channel().readAlls(), 0);
+  await ctx.advance(20 * SECOND);
+  await ctx.app.gladysConnected();
+  await ctx.advance(100);
+  assert.equal(ctx.channel().readAlls(), 0, 'sent again at 20 s: still waiting');
 });

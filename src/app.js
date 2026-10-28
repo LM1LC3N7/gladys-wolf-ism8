@@ -32,6 +32,7 @@
 // -----------------------------------------------------------------------------
 
 import { performance } from 'node:perf_hooks';
+import { createHash } from 'node:crypto';
 import { createLogger } from '@gladysassistant/integration-sdk';
 import { ChannelClient } from './channel.js';
 import { linkEnv, normalizeConfig } from './config.js';
@@ -58,6 +59,9 @@ import {
 } from './store.js';
 
 const HEX = /^(?:[0-9a-f]{2}){1,4}$/;
+/** 16 hex characters of the hash of the link environment (it holds the secret: never kept as is). */
+const envHash = (env) =>
+  createHash('sha256').update(JSON.stringify(env)).digest('hex').slice(0, 16);
 /** The ISM8 command byte of a value it reports (wolf_ism8: only 0x03 carries a value). */
 const VALUE_COMMAND = 0x03;
 
@@ -108,8 +112,6 @@ export class Ism8App {
     this.results = new Map();
     this.echoWaiters = new Set();
     this.lastReadAll = -Infinity;
-    this.lastButton = -Infinity;
-    this.followUps = new Set();
     this.lastCommand = undefined;
     this.lastStatus = undefined;
     this.publishedDevices = undefined;
@@ -157,8 +159,6 @@ export class Ism8App {
     this.connectEpoch += 1;
     this.timers.clearInterval(this.tickTimer);
     for (const id of Object.values(this.timersById)) this.timers.clearTimeout(id);
-    for (const id of this.followUps) this.timers.clearTimeout(id);
-    this.followUps.clear();
     this.timersById = {};
     this.publisher.stop();
     this.channel?.stop();
@@ -229,6 +229,7 @@ export class Ism8App {
       this.refreshCreated();
       await this.configUpdated(raw);
       if (epoch !== this.connectEpoch || this.stopped) return;
+      // Fresh values for Gladys, which forgot them (once per 30 s at most).
       this.readAll('connected');
       return;
     }
@@ -356,22 +357,42 @@ export class Ism8App {
 
   // --- The link (sub-container) ------------------------------------------------------------
 
+  /** Reads the state of the link from Gladys; the container entry, or undefined. */
+  async readLink(generation) {
+    const containers = await this.gladys.getContainers();
+    if (generation !== this.generation) return undefined;
+    const container = (containers ?? []).find((c) => c?.name === LINK.name);
+    const port = container?.ports?.find((p) => p?.name === LINK.portName)?.host_port;
+    this.link = {
+      ...this.link,
+      status: typeof container?.status === 'string' ? container.status.slice(0, 40) : 'unknown',
+      port: Number.isInteger(port) && port > 0 && port < 65536 ? port : null,
+      error: undefined,
+    };
+    return container;
+  }
+
+  /**
+   * Starts the link only when it does not run, or runs with another
+   * environment (address, sender check, secret): Gladys restarts a container
+   * on every startContainer, which drops the ISM8 session. The environment is
+   * compared through a hash kept in /data, never the secret itself.
+   */
   async ensureLink() {
     this.link.lastTry = this.clock();
     const generation = this.generation;
     try {
       const env = linkEnv(this.config, this.memory.token, LINK);
-      await this.gladys.startContainer(LINK.name, { env });
-      const containers = await this.gladys.getContainers();
+      const hash = envHash(env);
+      const container = await this.readLink(generation);
       if (generation !== this.generation) return;
-      const container = (containers ?? []).find((c) => c?.name === LINK.name);
-      const port = container?.ports?.find((p) => p?.name === LINK.portName)?.host_port;
-      this.link = {
-        ...this.link,
-        status: typeof container?.status === 'string' ? container.status.slice(0, 40) : 'unknown',
-        port: Number.isInteger(port) && port > 0 && port < 65536 ? port : null,
-        error: undefined,
-      };
+      if (container?.status !== 'running' || this.memory.linkEnv !== hash) {
+        await this.gladys.startContainer(LINK.name, { env });
+        this.memory.linkEnv = hash;
+        this.saveMemory();
+        await this.readLink(generation);
+        if (generation !== this.generation) return;
+      }
     } catch (err) {
       if (generation !== this.generation) return;
       this.link = { ...this.link, status: 'error', error: String(err.message).slice(0, 120) };
@@ -445,9 +466,21 @@ export class Ism8App {
     if (this.session) {
       this.refused = undefined;
       this.logger.info(`ISM8 session ${this.session.id} from ${this.session.from}`);
+      // The ISM8 sends every value by itself when it connects (Home Assistant
+      // never asks): the kept stops first, and a "request all" only if nothing
+      // came within 2 s.
       this.sendPendingStops('session');
-      this.readAll('session', { force: true });
+      this.scheduleSessionRead(this.session.id, TIMINGS.sessionRead);
     }
+  }
+
+  /** One "request all" if a new session brought no value (after the stops in flight). */
+  scheduleSessionRead(id, delay) {
+    this.later('sessionRead', delay, () => {
+      if (this.session?.id !== id || this.values.size > 0) return;
+      if (this.stopInFlight()) this.scheduleSessionRead(id, TIMINGS.stopResendSpacing);
+      else this.readAll('no values yet');
+    });
   }
 
   onLinkMessage(message) {
@@ -528,32 +561,49 @@ export class Ism8App {
     }
   }
 
-  /** The value of a datapoint read in the current session, recently enough; else undefined. */
-  freshValue(id, mono = this.clock()) {
+  /**
+   * The value of a datapoint read in the current ISM8 session, else
+   * undefined. The ISM8 reports every change while connected: a value of the
+   * current session is the current one; a new session forgets them all.
+   */
+  freshValue(id) {
     const entry = this.values.get(id);
     if (!entry || !this.session || entry.session !== this.session.id) return undefined;
-    return mono - entry.mono <= TIMINGS.valueFresh ? entry.value : undefined;
+    return entry.value;
   }
 
-  /** Asks the ISM8 for every value (at most once per 30 s unless forced). */
-  readAll(why, { force = false } = {}) {
+  /**
+   * Asks the ISM8 for every value: at most once per 30 s, and never while a
+   * stop sent less than 20 s ago is not confirmed (the "request all" frame
+   * announces 22 bytes for 12: nothing must follow it closely).
+   */
+  readAll(why) {
     const mono = this.clock();
     if (!this.session || !this.channel?.connected) return false;
-    if (!force && mono - this.lastReadAll < TIMINGS.refreshButton) return false;
+    if (mono - this.lastReadAll < TIMINGS.refreshButton) return false;
+    if (this.stopInFlight(mono)) return false;
     this.lastReadAll = mono;
     this.logger.debug(`Reading every value (${why})`);
     return this.channel.send({ type: 'readAll', seq: ++this.seq, session: this.session.id });
+  }
+
+  /** A stop sent less than stopResend ago and not confirmed yet. */
+  stopInFlight(mono = this.clock()) {
+    return [...this.memory.stops].some(
+      ([id, stop]) =>
+        !stop.confirmed &&
+        mono - (this.stopState.get(id)?.lastSent ?? -Infinity) < TIMINGS.stopResend,
+    );
   }
 
   async refreshButton() {
     await this.boot();
     const mono = this.clock();
     if (!this.session || !this.channel?.connected) return REFRESH.noSession;
-    const wait = this.lastButton + TIMINGS.refreshButton - mono;
+    const wait = this.lastReadAll + TIMINGS.refreshButton - mono;
     if (wait > 0) return REFRESH.tooSoon(Math.ceil(wait / 1000));
-    this.lastButton = mono;
-    this.readAll('button', { force: true });
-    return REFRESH.sent;
+    if (this.stopInFlight(mono)) return REFRESH.stopInFlight;
+    return this.readAll('button') ? REFRESH.sent : REFRESH.noSession;
   }
 
   async tick() {
@@ -571,9 +621,6 @@ export class Ism8App {
       // rather than at the end of the backoff.
       this.channel?.retryNow?.();
     }
-    if (this.session && mono - this.lastReadAll >= TIMINGS.refresh) {
-      this.readAll('refresh', { force: true });
-    }
     await this.updateStatus();
   }
 
@@ -584,28 +631,60 @@ export class Ism8App {
     return this.stopState.get(id);
   }
 
-  /** Sends one kept stop now if the ISM8 is connected; counts the attempt. */
-  sendStop(id, why) {
+  /**
+   * Sends one kept stop now if the ISM8 is connected; counts the attempt.
+   * The link never refuses a stop for its rate (`stop: true`); if it did not
+   * write it (the ISM8 session changed meanwhile), the attempt does not count
+   * and the stop leaves on the new session (sendPendingStops). Returns the
+   * link's answer (a promise: the answer, or undefined when the channel
+   * dropped or the deadline passed: the bytes may have left), or undefined
+   * when nothing could be handed to the link.
+   */
+  sendStop(id, why, deadline = this.clock() + TIMINGS.commandAnswer) {
     const stop = this.memory.stops.get(id);
     const dp = DATAPOINTS.get(id);
     if (!stop || !dp || !this.session || !this.channel?.connected) return undefined;
     const seq = ++this.seq;
+    const session = this.session.id;
     const hex = encodeCommand(dp, STOP[dp.command]).toString('hex');
-    const sent = this.channel.send({ type: 'write', seq, session: this.session.id, id, hex });
+    const sent = this.channel.send({ type: 'write', seq, session, id, hex, stop: true });
     if (!sent) return undefined;
     stop.attempts = Math.min(LIMITS.stopAttempts, stop.attempts + 1);
-    // An attempt the link did not write (another ISM8 session, its rate) does not count.
-    this.results.set(seq, (answer) => {
-      if (answer?.sent === false && this.memory.stops.get(id) === stop && stop.attempts > 0) {
-        stop.attempts -= 1;
-        this.saveMemory();
-      }
-    });
-    this.stateOfStop(id).lastSent = this.clock();
+    const state = this.stateOfStop(id);
+    state.lastSent = this.clock();
     this.logger.info(`Stop of datapoint ${id} sent (${why}, attempt ${stop.attempts})`);
     this.saveMemory();
-    this.followUp();
-    return seq;
+    const answer = new Promise((resolve) => {
+      const timer = this.timers.setTimeout(
+        () => {
+          if (this.results.delete(seq)) resolve(undefined);
+        },
+        Math.max(0, deadline - this.clock()),
+      );
+      this.results.set(seq, (message) => {
+        this.timers.clearTimeout(timer);
+        if (message?.sent === false && this.memory.stops.get(id) === stop) {
+          // Not written: the attempt is given back and the stop leaves again now.
+          stop.attempts = Math.max(0, stop.attempts - 1);
+          state.lastSent = -Infinity;
+          this.saveMemory();
+          // A new ISM8 session sends it again (sendPendingStops, already done
+          // when the session changed before this answer).
+        }
+        resolve(message);
+      });
+    });
+    // Not confirmed by a read within 20 s: sent again (3 sendings in all).
+    this.later(`stopResend-${id}`, TIMINGS.stopResend, () => {
+      if (
+        this.memory.stops.get(id) === stop &&
+        !stop.confirmed &&
+        stop.attempts < LIMITS.stopAttempts
+      ) {
+        this.sendStop(id, 'no confirmation');
+      }
+    });
+    return answer;
   }
 
   sendPendingStops(why) {
@@ -648,19 +727,8 @@ export class Ism8App {
       this.saveMemory();
       this.updateStatus();
     } else {
-      this.later(`contra-${dp.id}`, TIMINGS.echoRead, () =>
-        this.readAll('stop check', { force: true }),
-      );
-    }
-  }
-
-  followUp() {
-    for (const delay of TIMINGS.followUps) {
-      const id = this.timers.setTimeout(() => {
-        this.followUps.delete(id);
-        if (!this.stopped) this.readAll('follow-up', { force: true });
-      }, delay);
-      this.followUps.add(id);
+      // A second read, a while later (one "request all" per 30 s at most).
+      this.later(`contra-${dp.id}`, TIMINGS.contraRead, () => this.readAll('stop check'));
     }
   }
 
@@ -774,18 +842,17 @@ export class Ism8App {
     this.memory.stops.set(dp.id, { at: this.now(), attempts: 0, confirmed: false });
     this.stopState.set(dp.id, { lastSent: -Infinity, contra: 0 });
     const after = this.clock();
-    const seq = this.sendStop(dp.id, 'click');
+    const deadline = received + TIMINGS.commandAnswer;
+    const echo = this.waitEcho(dp, STOP[dp.command], after, deadline);
+    const answer = this.sendStop(dp.id, 'click', deadline);
     this.saveMemory();
-    if (seq === undefined) {
+    if (answer === undefined || (await answer)?.sent === false) {
+      // Not written now: kept, sent on the next session (see sendStop).
+      for (const waiter of [...this.echoWaiters]) if (waiter.id === dp.id) waiter.resolve(false);
       this.note(COMMAND.kept);
       return { kept: true };
     }
-    const confirmed = await this.waitEcho(
-      dp,
-      STOP[dp.command],
-      after,
-      received + TIMINGS.commandAnswer,
-    );
+    const confirmed = await echo;
     this.note(confirmed ? COMMAND.success : COMMAND.unconfirmed);
     return { confirmed };
   }
@@ -801,7 +868,7 @@ export class Ism8App {
     const otherStop = [...this.memory.stops].some(
       ([id, stop]) => id !== dp.id && !stop.confirmed && DATAPOINTS.get(id)?.slug === dp.slug,
     );
-    if (otherStop || (guard && !guard.confirmed && dp.command === 'dhw-setpoint')) {
+    if (otherStop) {
       throw this.refuse(COMMAND.why.stopRunning);
     }
     if (!this.session) {
@@ -859,8 +926,6 @@ export class Ism8App {
       throw this.refuse(COMMAND.why.link);
     }
     if (guard) this.stopState.delete(dp.id);
-    this.followUp();
-    this.later(`echo-${dp.id}`, TIMINGS.echoRead, () => this.readAll('echo', { force: true }));
     const echo = this.waitEcho(dp, wanted, after, received + TIMINGS.commandAnswer);
     const answer = await write.result;
     if (answer && answer.sent === false) {

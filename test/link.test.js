@@ -209,7 +209,7 @@ test('writes: refused for another session, an invalid id or value, or over the r
     ],
   );
   for (let i = 0; i < LIMITS.linkWrites + 3; i += 1)
-    client.send({ type: 'readAll', seq: 10 + i, session });
+    client.send({ type: 'write', seq: 10 + i, session, id: 57, hex: '00' });
   await until(
     () => messages.filter((m) => m.type === 'result').length === 4 + LIMITS.linkWrites + 3,
   );
@@ -256,4 +256,117 @@ test('sockets still closing count: a fifth one in a burst is closed at once', as
   for (const socket of sockets) link.server.emit('connection', socket);
   assert.equal(link.session().socket, sockets[3], 'the fifth never became the session');
   assert.equal(sockets[4].destroyed, true);
+});
+
+test('a stop is never refused for the rate; "stop" must be a standby; last-hop checks', async (t) => {
+  const { client, messages, port } = await start(t);
+  const ism8 = await fakeIsm8(port);
+  await until(() => messages.some((m) => m.type === 'session' && m.state === 'up'));
+  const session = messages.find((m) => m.type === 'session').session;
+  for (let i = 0; i < LIMITS.linkWrites; i += 1)
+    client.send({ type: 'write', seq: 100 + i, session, id: 57, hex: '00' });
+  client.send({ type: 'write', seq: 1, session, id: 57, hex: '00' });
+  client.send({ type: 'write', seq: 2, session, id: 57, hex: '02', stop: true });
+  client.send({ type: 'write', seq: 3, session, id: 58, hex: '04', stop: true });
+  client.send({ type: 'write', seq: 4, session, id: 57, hex: '00', stop: true });
+  client.send({ type: 'write', seq: 5, session, id: 199, hex: '0c1a', stop: false });
+  client.send({ type: 'write', seq: 6, session, id: 56, hex: temp(66).toString('hex') });
+  client.send({ type: 'write', seq: 7, session, id: 57, hex: '04' });
+  client.send({ type: 'write', seq: 8, session, id: 56, hex: temp(55.5).toString('hex') });
+  await until(() => messages.filter((m) => m.type === 'result').length === LIMITS.linkWrites + 8);
+  const result = (seq) => messages.find((m) => m.type === 'result' && m.seq === seq);
+  assert.equal(result(1).reason, 'rate');
+  assert.equal(result(2).sent, true, 'a stop over the rate leaves');
+  assert.equal(result(3).sent, true);
+  assert.equal(result(4).reason, 'invalid', 'a "stop" that is not standby');
+  for (const seq of [5, 6, 7, 8]) assert.equal(result(seq).reason, 'invalid', `seq ${seq}`);
+  assert.equal(ism8.closed, false);
+});
+
+test('two full dumps of 300 frames of one datapoint each keep the session', async (t) => {
+  const { messages, port } = await start(t);
+  const ism8 = await fakeIsm8(port);
+  await until(() => messages.some((m) => m.type === 'session' && m.state === 'up'));
+  ism8.send(
+    Buffer.concat(Array.from({ length: 600 }, (_, i) => valuesFrame([[1 + (i % 250), temp(20)]]))),
+  );
+  await until(() => messages.filter((m) => m.type === 'values').length === 600);
+  assert.equal(ism8.closed, false);
+});
+
+test('a frame from the field with an empty datapoint is acknowledged, the session kept', async (t) => {
+  const { messages, port } = await start(t);
+  const ism8 = await fakeIsm8(port);
+  // wolf_ism8 tests, "network msg from github": datapoint 178, length 0.
+  ism8.send(Buffer.from('0620f080001404000000f00600b2000100b20300', 'hex'));
+  await until(() => ism8.bytes.length >= 17);
+  assert.deepEqual(ism8.bytes.subarray(0, 17), ackFrame(0xb2));
+  assert.equal(ism8.closed, false);
+  assert.ok(!messages.some((m) => m.type === 'values'));
+});
+
+test('the link refuses a client whose proof is wrong, and takes no message from it', async (t) => {
+  const { link, port } = await start(t);
+  const ism8 = await fakeIsm8(port);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const raw = connect({ host: '127.0.0.1', port: link.channel.port });
+  const lines = [];
+  raw.on('data', (d) => lines.push(...d.toString().split('\n').filter(Boolean)));
+  raw.on('error', () => {});
+  let closed = false;
+  raw.on('close', () => (closed = true));
+  await until(() => lines.length >= 1);
+  raw.write(`${JSON.stringify({ type: 'hello', nonce: 'a'.repeat(32), proof: 'b'.repeat(64) })}\n`);
+  raw.write(`${JSON.stringify({ type: 'readAll', seq: 1, session: 1 })}\n`);
+  await until(() => closed);
+  assert.ok(!lines.some((l) => l.includes('"ready"')));
+  assert.equal(ism8.bytes.length, 0, 'nothing written to the ISM8');
+});
+
+test('the main container refuses a link that does not prove the secret', async (t) => {
+  const { createServer } = await import('node:net');
+  const server = createServer((socket) => {
+    socket.on('error', () => {});
+    socket.write(`${JSON.stringify({ type: 'challenge', nonce: 'c'.repeat(32) })}\n`);
+    socket.on('data', () => {
+      socket.write(`${JSON.stringify({ type: 'ready', proof: 'd'.repeat(64), session: null })}\n`);
+      socket.write(
+        `${JSON.stringify({ type: 'values', session: 1, at: new Date().toISOString(), items: [] })}\n`,
+      );
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const client = new ChannelClient({
+    host: '127.0.0.1',
+    port: server.address().port,
+    token: TOKEN,
+    delays: [10_000],
+  });
+  let up = false;
+  const messages = [];
+  client.on('up', () => (up = true));
+  client.on('message', (m) => messages.push(m));
+  client.start();
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  client.stop();
+  assert.equal(up, false);
+  assert.equal(messages.length, 0);
+});
+
+test('one "request all" per 30 s, whoever asks', async (t) => {
+  const { client, messages, port } = await start(t);
+  const ism8 = await fakeIsm8(port);
+  await until(() => messages.some((m) => m.type === 'session' && m.state === 'up'));
+  const session = messages.find((m) => m.type === 'session').session;
+  client.send({ type: 'readAll', seq: 1, session });
+  client.send({ type: 'readAll', seq: 2, session });
+  await until(() => messages.filter((m) => m.type === 'result').length === 2);
+  const results = messages.filter((m) => m.type === 'result');
+  assert.deepEqual(
+    results.map((r) => r.sent),
+    [true, false],
+  );
+  assert.equal(results[1].reason, 'rate');
+  assert.equal(ism8.closed, false);
 });

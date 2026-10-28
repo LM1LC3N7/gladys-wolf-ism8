@@ -103,10 +103,12 @@ test('real clock x20: values, a confirmed write, an immediate stop, a 10 s round
         state.set(entry.id, Buffer.from(entry.hex, 'hex'));
         ism8.send(valuesFrame([[entry.id, state.get(entry.id)]]));
       }
-      if (entry === 'readAll') ism8.send(valuesFrame([...state]));
+      if (entry === 'readAll') for (const item of state) ism8.send(valuesFrame([item]));
     }
   });
   await until(() => app.session);
+  // As a real ISM8 at connection: every value, one datapoint per frame.
+  for (const item of state) ism8.send(valuesFrame([item]));
   await until(() => gladys.fake.lastState(feature('appliance-1', 4)) === 48);
 
   const target = (id) => ({ external_id: feature('direct-circuit', id) });

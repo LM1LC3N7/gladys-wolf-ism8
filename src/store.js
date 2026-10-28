@@ -8,6 +8,8 @@
 //           each side that the other one is ours. Kept here, not in the
 //           Gladys configuration, so that a stop kept below can leave at
 //           start-up before the configuration is read.
+//   linkEnv 16 hex characters of the hash of the environment the link was
+//           last started with (the link is started again only when it changes)
 //   seen    the ids of the datapoints the ISM8 reported (the Discovery is
 //           rebuilt from them at start-up)
 //   stops   the stops (standby programs) asked and not lifted:
@@ -89,7 +91,12 @@ export function memoryStore(initial = null, { failing = false, unreadable = fals
   };
 }
 
-export const emptyMemory = () => ({ token: undefined, seen: new Set(), stops: new Map() });
+export const emptyMemory = () => ({
+  token: undefined,
+  linkEnv: undefined,
+  seen: new Set(),
+  stops: new Map(),
+});
 
 /** A datapoint id whose stop may be kept: a program with a standby. */
 const stoppable = (id) => STOP[DATAPOINTS.get(id)?.command] !== undefined;
@@ -102,6 +109,9 @@ export function normalizeMemory(raw, now) {
   }
   if (Object.hasOwn(raw, 'token') && isToken(raw.token)) {
     memory.token = raw.token;
+  }
+  if (Object.hasOwn(raw, 'linkEnv') && /^[0-9a-f]{16}$/.test(String(raw.linkEnv))) {
+    memory.linkEnv = raw.linkEnv;
   }
   if (Object.hasOwn(raw, 'seen') && Array.isArray(raw.seen)) {
     for (const id of raw.seen.slice(0, 400)) {
@@ -127,6 +137,7 @@ export function normalizeMemory(raw, now) {
 export function serializeMemory(memory) {
   return {
     token: memory.token,
+    linkEnv: memory.linkEnv,
     seen: [...memory.seen].sort((a, b) => a - b),
     stops: Object.fromEntries(
       [...memory.stops].map(([id, { at, attempts, confirmed }]) => [

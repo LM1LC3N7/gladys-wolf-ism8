@@ -12,13 +12,22 @@
 //   a write, DatapointValue.Ind (one datapoint):
 //     06 20 F0 80 | size | 04 00 00 00 F0 C1 | id (2) | 00 01 | id (2) | 00 | length | value
 //   "request all datapoints" (the ISM8 then sends every value again):
-//     06 20 F0 80 00 16 04 00 00 00 F0 D0   (12 bytes, size field as wolf_ism8 sends it)
+//     06 20 F0 80 00 16 04 00 00 00 F0 D0
+//   12 bytes whose size field says 22: byte for byte what wolf_ism8 (on a
+//   click) and the openHAB ISM8 binding (once, right after the ISM8
+//   connected, then its acknowledgements) send. The openHAB binding has been
+//   used with real ISM8 modules for years: an ISM8 waiting for 22 bytes would
+//   swallow the 10 first bytes of its first acknowledgement every time. Kept as
+//   is, and sent as seldom as they do (see src/app.js).
 //
 // Differences with wolf_ism8, on purpose: a frame is checked whole before
 // anything is used (header, size, service, the datapoints filling the frame
-// exactly, command 0x03 and a value of 1 to 4 bytes each); a byte stream that
-// does not start with the header is refused instead of searched for the next
-// header; frames are bounded (FRAME.max bytes, FRAME.maxItems datapoints).
+// exactly); a datapoint of 0 or more than 4 bytes is skipped, never the
+// connection (wolf_ism8 has such a frame in its tests, taken from the field);
+// a byte stream that does not start with the header is refused instead of
+// searched for the next header; frames are bounded (FRAME.max bytes,
+// FRAME.maxItems datapoints). The command byte (0x03 for a value) is checked
+// by the main container (src/app.js), which decodes.
 // -----------------------------------------------------------------------------
 
 export const HEADER = Buffer.from([0x06, 0x20, 0xf0, 0x80]);
@@ -33,8 +42,8 @@ export const SERVICE = Object.freeze({
 export const FRAME = Object.freeze({
   /** Header (4) + size (2) + connection header (4). */
   prefix: 10,
-  /** The smallest SetDatapointValue.Req: prefix + F0 06 + start + count + one datapoint of 1 byte. */
-  min: 21,
+  /** The smallest SetDatapointValue.Req: prefix + F0 06 + start + count + one empty datapoint. */
+  min: 20,
   /** The largest frame accepted (the ISM8 knows about 300 datapoints of 1 to 4 bytes). */
   max: 2048,
   maxItems: 300,
@@ -131,10 +140,13 @@ export function parseFrame(frame) {
     const id = frame.readUInt16BE(at);
     const command = frame[at + 2];
     const length = frame[at + 3];
-    if (length < 1 || length > FRAME.maxValue || at + 4 + length > frame.length) {
+    if (at + 4 + length > frame.length) {
       throw new FrameError('length');
     }
-    items.push({ id, command, value: Buffer.from(frame.subarray(at + 4, at + 4 + length)) });
+    // A datapoint without a value or longer than any known type: skipped, the frame kept.
+    if (length >= 1 && length <= FRAME.maxValue) {
+      items.push({ id, command, value: Buffer.from(frame.subarray(at + 4, at + 4 + length)) });
+    }
     at += 4 + length;
   }
   if (at !== frame.length) {

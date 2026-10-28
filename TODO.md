@@ -32,16 +32,17 @@ up to date at the end of every milestone.
 
 ## To check on a real ISM8i
 
-- The "request all datapoints" frame: wolf_ism8 sends 12 bytes whose size
-  field says 22 (`0x16`); ported byte for byte. Does the ISM8i answer it
-  with every value? Does it also send every value by itself at connection?
+- The "request all datapoints" frame: wolf_ism8 and the openHAB binding send
+  12 bytes whose size field says 22 (`0x16`); ported byte for byte. Does the
+  ISM8i answer it with every value, reading 12 bytes? Does it send every
+  value by itself at connection (Home Assistant relies on it)?
 - How fast the ISM8i reconnects after the link restarted (every main
   container restart, see Decisions).
 - Whether the ISM8i reports a written datapoint back (the confirmation of a
-  command relies on it, plus the full read 1.2 s after the write): if not,
-  every command stays "sent, without confirmation" until a follow-up read.
-- The unit of the system pressure (`DPT_Value_Pres`, Pa per KNX, values
-  around 1.5 would mean bar): published raw, `unknown/decimal`, until then.
+  command relies on it only): if not, every command stays "sent, without
+  confirmation" and every stop is sent 3 times.
+- The system pressure (`DPT_Value_Pres`): published in Pa as the reference
+  (KNX 9.006, Home Assistant); values around 1.5 would mean bar.
 - The program codes (HVACMode 0-3, DHWMode 0/2/4) against the BM-2 display;
   standby keeping the frost protection (Wolf documentation).
 - How often the ISM8i sends the keep-alive (767) and whether it reconnects
@@ -78,22 +79,46 @@ up to date at the end of every milestone.
   the docs, with Docker Desktop and rootless Docker.
   Also seen there: Gladys restarts the link whenever the main container
   restarts (the ISM8 session drops; the ISM8i must reconnect by itself), and
-  the main container reached the new link only after 20-35 s, its ARP entry
+  the main container reached the new link only after 20-50 s (the reviewer
+  measured 45 and 49 s), its ARP entry
   for the link's address still holding the MAC of the old container
   (`ip neigh`: PROBE on the old MAC). Hence the channel drops a connect
   attempt after 3 s and the background round asks it to try again every
-  10 s; at boot, a kept stop can leave on the link still running from
-  before (it did connect within 15 ms there).
+  10 s. At boot the channel reaches the old link for a moment; under the
+  supervisor Gladys restarts it right after, so a kept stop leaves when the
+  ISM8i is back on the new link (still before getConfig).
 - **Sender check** (`check_source`, on by default): the link closes a
   connection from another address before reading a byte and tells the main
-  container (address only, at most every 10 s); turning it off is documented
+  container (address only, at most every 10 s). Turned off, any machine can
+  take the session, send false values, receive the writes (stops included)
+  and confirm or contradict them (manifest and docs say so); turning it off
+  is documented
   as the Docker-hides-the-address case only.
 - **Link bounds**: 4 sockets, one ISM8 session (a new connection of the ISM8
   replaces the old one, never two), frames 2048 bytes / 300 datapoints
   checked whole, a stream not starting with the header refused, an
-  incomplete frame closed after 5 s, 400 frames per 10 s, 20 writes per 10 s,
-  500 messages queued while the main container is away. Every valid
-  SetDatapointValue.Req is acknowledged at once (wolf_ism8 does the same).
+  incomplete frame closed after 5 s, 1000 frames per 10 s (a full dump is
+  about 300 frames of one datapoint, as the field captures show), 20 writes
+  and one "request all" per 30 s, 500 messages queued while the main
+  container is away. A stop (`stop: true`, checked to be a standby) is never
+  counted nor refused by the rate. Last check before the bytes leave
+  (`checkWrite`): only the datapoints of `COMMANDS`, a whole hot water
+  setpoint of 20-65 °C, an offered program code. Every valid
+  SetDatapointValue.Req is acknowledged at once (wolf_ism8 does the same); a
+  datapoint of 0 or more than 4 bytes is skipped, the frame kept (wolf_ism8
+  has such a frame from the field in its tests).
+- **"Request all"**: never periodic, never after a command. Sent only when a
+  new session brought no value within 2 s, on the button, when Gladys
+  reconnects and as a second read of a contradicted stop, at most once per
+  30 s and never while a stop sent less than 20 s ago is unconfirmed (its
+  size field says 22 for 12 bytes: nothing must follow it closely). Kept
+  byte for byte: the openHAB binding sends it at every connection followed
+  by its acknowledgements, on real modules for years.
+- **The link is started** only when it does not run or its environment
+  changed (a hash of the environment kept in /data as `linkEnv`): Gladys
+  restarts a container on every `startContainer`, dropping the ISM8 session
+  (review r1, I4). Gladys itself restarts the link when the main container
+  starts; a kept stop then leaves when the ISM8 is back, before getConfig.
 - **Channel**: JSON lines over the private network, mutual HMAC
   challenge-response (from gladys-nasweb), made two-way (writes and "request
   all" from the main container, answered `sent: true|false`). The secret is
@@ -103,13 +128,14 @@ up to date at the end of every milestone.
 - **Identity**: the ISM8 protocol carries no serial: one ISM8 per
   integration, device ids `wolf-ism8:<slug>` per Wolf element, features
   `dp-<id>`. A session id (from the link) tags every value: a decision uses
-  only a value of the current session, at most 15 min old (a full read every
-  5 min keeps them fresh).
+  only a value of the current session (the ISM8 reports every change while
+  connected; a new session forgets them all).
 - **Values**: decoded only in the main container; the KNX "invalid" float,
   a wrong length, an unknown datapoint, a command byte other than 0x03 or a
   value outside the plausibility range of its kind is dropped. Modes and the
-  fault code are texts, never a number. Pressure, percentages, temperature
-  differences and flows are `unknown/decimal`, the unit in the name.
+  fault code are texts, never a number. Pressure in Pa
+  (`pressure-sensor`); percentages, temperature differences and flows are
+  `unknown/decimal`, the unit in the name.
   Values older than a minute (queued by the link, or waiting for Gladys)
   are never published; Gladys reconnecting forgets what was published and
   asks the ISM8 for fresh values instead.
@@ -123,13 +149,14 @@ up to date at the end of every milestone.
   click, same session, sent within 2.5 s); one command per datapoint;
   success only on a value read back after the write (3.4 s at most), a
   value equal to the one before is not a confirmation; otherwise "sent,
-  without confirmation" and full reads 1.2, 5 and 20 s after. The link not
+  without confirmation" (no read asked after it). The link not
   writing it gives "not sent". The ack never waits for Gladys.
 - **The stop** (standby program, heating or hot water): never held (no
   option, bound, read, busy setting, getConfig). Kept in `/data` (`stops`),
   sent at once when a session is up, else at the next session (3 attempts
-  in all, an attempt the link did not write does not count), sent again 5 s
-  apart while a read contradicts it before confirmation. Confirmed by a
+  in all, an attempt the link did not write does not count and gives
+  "stop kept", never "sent"), sent again when no read confirmed it within
+  20 s, or 5 s apart while a read contradicts it before confirmation. Confirmed by a
   read; after that never sent again: lifted by two reads in a row of another
   program (changed at the boiler) or a user click on another program with
   the option (removed from /data before the bytes leave, put back if
@@ -143,6 +170,15 @@ up to date at the end of every milestone.
   configurations saved back to back are applied one after the other.
 - **Rate**: the publisher sends at most 250 states a minute, unchanged
   values skipped (`publishChangedStates`).
+- **Review round 1 (2026-10-28)**: B1 stops out of the link's rate, a stop
+  not written said "kept" and sent on the next session, resent after 20 s
+  without confirmation; I1 no periodic or follow-up "request all", 1000
+  frames per 10 s; I2 "request all" kept byte for byte (openHAB, wolf_ism8)
+  and sent as seldom as above; I3 empty or 5-byte datapoints skipped, not
+  the session; I4 link started only when needed; I5 tests for the channel
+  proofs (both sides), the exhausted stop at the next session, 301
+  datapoints; m1 pressure in Pa; m2 risk of the sender check off described;
+  m3 last-hop check in the link; m4 comments, dead clause.
 - **gladys_version >= 5.1.0** (sub-containers and `{{port:}}`); category
   `climate`, transport `local`; no `keywords`/`countries`.
 - **Template demo files** (devices, scenes, widgets, weather and their

@@ -21,9 +21,9 @@ value received:
 - states (burner, pumps, valves, fault, outputs), read only;
 - operating states and programs as texts (never published as a measure 0),
   the last fault code;
-- percentages (burner, modulation, ventilation), setpoint corrections (K),
-  flows (l/h) and the system pressure (raw value, as the ISM8i sends it) as
-  plain values, the unit in the name;
+- the system pressure, in Pa (the unit of the Wolf interface);
+- percentages (burner, modulation, ventilation), setpoint corrections (K) and
+  flows (l/h) as plain values, the unit in the name;
 - the hot water setpoint and the heating and hot water programs of the direct
   circuit and of the mixer circuits 1 to 3, which can be changed (see below).
 
@@ -49,7 +49,7 @@ on the machine.
 4. In the web page of the ISM8i, set the server address to the IP address of
    the Gladys machine on your network, and this port.
 5. The status of the integration turns to "ISM8i connected" at the first
-   connection; every value is then asked from the module.
+   connection; the ISM8i then sends every value by itself.
 
 ### The network: what was checked
 
@@ -65,7 +65,7 @@ Checked in a test Gladys running in Docker (2026-10-28): nothing listens
 before the address is saved; once saved, the port is published, a
 connection from another address of the network arrives with **its real
 source address** (Docker keeps it for traffic coming from the network) and
-gets the acknowledgement and the request for every value; a connection
+gets its acknowledgement; a connection
 started on the Gladys machine itself arrives with the address of the Docker
 gateway instead.
 
@@ -77,14 +77,17 @@ Hence:
   status shows the address seen. With Docker Desktop (Mac, Windows) or
   rootless Docker, Docker may replace the source address: the status then shows
   connections refused from an internal address; turn the option off in that
-  case only (any machine of the network can then send values in place of the
-  ISM8i);
+  case only: any machine of the network can then take the place of the
+  ISM8i (the ISM8i is disconnected), send false values, receive the writes
+  meant for the boiler, stops included, and confirm or contradict them;
 - through Gladys Plus or a proxy, the address your browser shows is not the
   one the ISM8i must reach: use the local address of the machine.
-- when the integration restarts (update, Gladys restart), Gladys restarts the
-  receiver too: the connection of the ISM8i drops, the ISM8i reconnects by
-  itself, and the integration finds the receiver again within about 30 s
-  (the time Docker takes to forget the old container).
+- the receiver is started again only when it stopped or when the address
+  or the sender check changes (each start drops the connection of the
+  ISM8i). When the integration itself restarts (update, Gladys restart),
+  Gladys restarts the receiver too: the ISM8i reconnects by itself, and the
+  integration found the receiver again within 20 to 50 s in the test (the
+  time Docker takes to forget the old container), up to about a minute.
 
 ## Changing settings
 
@@ -100,9 +103,9 @@ Off by default. With **Allow changing the settings**:
 A command leaves only if the option is on when it arrives **and** right
 before sending, if the ISM8i is connected, and if the current value was
 received during its current connection. It is said applied only when the
-ISM8i reports the new value back; otherwise "sent, without confirmation",
-and every value is asked again 5 and 20 s later. The outcome shows in the
-status of the integration.
+ISM8i reports the new value back (it reports every change by itself);
+otherwise "sent, without confirmation". The outcome shows in the status of
+the integration.
 
 Never written: power and temperature presets of the boilers, time programs,
 the one-off hot water charge, ventilation, and any other value.
@@ -115,17 +118,21 @@ option off, ceiling, value not read yet, another command running,
 configuration not yet read from Gladys, nothing holds it. It is kept in
 `/data` and:
 
-- leaves at once when the ISM8i is connected;
-- otherwise leaves at the next connection of the ISM8i (and, after a restart
-  of the integration, as soon as the receiver answers, even before the
-  configuration is read);
-- is sent again, 5 s apart, when a value read contradicts it before it was
-  confirmed, 3 sendings at most in all; beyond that, the status asks you to
-  check the boiler.
+- leaves at once when the ISM8i is connected, never held by the limits of
+  the receiver (they do not apply to it);
+- otherwise leaves at the next connection of the ISM8i, without waiting for
+  the configuration (after a restart of the integration too, as soon as the
+  ISM8i is back on the receiver);
+- is sent again when no value read confirms it within 20 s, or 5 s apart
+  when a value read contradicts it, 3 sendings at most in all; beyond that,
+  the status asks you to check the boiler.
 
 The only cases where it does not leave at once: the ISM8i is not connected,
-or the receiver is not running (address not saved yet); it then waits in
-`/data`. Once confirmed it is never sent again: a program changed later on
+its connection changed at that very moment (the stop then leaves at once on
+the new one), or the receiver is not running (address not saved yet). It
+then waits in `/data` and the status says "stop kept", never "sent". No
+"request all" is sent within 20 s of a stop not yet confirmed. Once
+confirmed it is never sent again: a program changed later on
 the boiler or in the Wolf app, read twice in a row, lifts the stop without
 being fought. Choosing another program in Gladys (option on) lifts it too.
 Time alone never lifts it.
@@ -141,16 +148,20 @@ another program for the stopped one stays allowed (it lifts the stop).
 - The receiver accepts 4 connections at most, one ISM8 session at a time (a
   new connection of the ISM8i replaces the old one), frames of 2048 bytes and
   300 values at most, checked whole; a malformed frame, a frame incomplete
-  for 5 s or a flood of more than 400 frames in 10 s closes the connection.
+  for 5 s or a flood of more than 1000 frames in 10 s closes the connection
+  (a full dump is about 300); a value of 0 or more than 4 bytes is skipped.
+- The receiver writes to the ISM8i only the hot water setpoints (20 to
+  65 °C) and the program codes offered here, whatever it is asked.
 - The channel between the receiver and the integration goes through the
   private network of the integration, with a mutual proof of a secret the
   integration generates.
 
 ## The "Read every value again" button
 
-Asks the connected ISM8i to send every value again (at most every 30 s). The
-integration also does it at every connection, every 5 minutes and after each
-command.
+Asks the connected ISM8i to send every value again (at most every 30 s,
+never within 20 s of a stop not yet confirmed). The integration also asks
+when Gladys reconnects, to show fresh values; otherwise the ISM8i sends
+every value when it connects and each change afterwards.
 
 ## Troubleshooting
 
@@ -161,8 +172,8 @@ command.
   typed; fix the address, or see above (Docker hiding the address).
 - **A value is missing**: the ISM8i only sends what your installation has; a
   value outside its plausible range is never published.
-- **Odd pressure**: the pressure is published as the ISM8i sends it; its real
-  unit is still to be confirmed on a real module.
+- **Odd pressure**: the pressure is published in Pa as the Wolf interface
+  says; tell us if a real module sends bar instead.
 
 ## Credits
 
