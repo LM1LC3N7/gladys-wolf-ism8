@@ -200,3 +200,11 @@ up to date at the end of every milestone.
   tests) removed.
 - **Not checked here**: duplicates in the store and the forum (done when the
   lot was reserved); a real ISM8i.
+
+## Next patch
+
+- r3 m1: no test covers the second read of a contradicted stop (`src/app.js:810`).
+- r3 m2: a read requested in a new session can be lost: the pending request of the old session is kept and
+  then dropped (`requestRead`, `src/app.js:629-635`). Found by reading, not replayed.
+- r3 m3: a rate refusal by the link updates `lastReadAll` with nothing sent (`src/app.js:600`), which can
+  trigger a needless 3 s stop resend that uses one of the 3 tries. No test.
