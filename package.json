@@ -1,6 +1,6 @@
 {
   "name": "gladys-wolf-ism8",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Gladys Assistant external integration for Wolf heating systems through the ISM8i module (local TCP, the module connects to Gladys): temperatures, states, faults, programs, optional writes with a capped hot water setpoint. Unofficial, not affiliated with Wolf.",
   "type": "module",

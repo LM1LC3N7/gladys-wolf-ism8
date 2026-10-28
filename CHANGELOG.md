@@ -10,6 +10,8 @@ the notes of the version's GitHub Release.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-28
+
 ### Added
 
 - First version: the Wolf heating system through an ISM8i (or ISM8) module,
@@ -24,3 +26,6 @@ the notes of the version's GitHub Release.
   by default; the standby program (the stop) is never blocked, kept in
   `/data` and sent at the next connection of the ISM8i.
 - A button to read every value again.
+
+[Unreleased]: https://github.com/LM1LC3N7/gladys-wolf-ism8/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/LM1LC3N7/gladys-wolf-ism8/releases/tag/v0.1.1
